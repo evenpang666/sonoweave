@@ -1,0 +1,171 @@
+{
+  "network_blocked": true,
+  "input": "jfk.flac, paced at original speed; no speaker playback",
+  "updates": [
+    {
+      "text": "所以",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 1,
+      "final": false,
+      "lag_seconds": 0.125,
+      "since_started_seconds": 1.0370000000111759,
+      "since_stream_start_seconds": 1.031
+    },
+    {
+      "text": "所以我的",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 2,
+      "final": false,
+      "lag_seconds": 1.0940000000409782,
+      "since_started_seconds": 2.553000000072643,
+      "since_stream_start_seconds": 2.547
+    },
+    {
+      "text": "所以我的同胞美国",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 3,
+      "final": false,
+      "lag_seconds": 0.625,
+      "since_started_seconds": 2.631000000052154,
+      "since_stream_start_seconds": 2.625
+    },
+    {
+      "text": "所以我的同胞美国人。",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 4,
+      "final": false,
+      "lag_seconds": 0.125,
+      "since_started_seconds": 2.694000000017695,
+      "since_stream_start_seconds": 2.688
+    },
+    {
+      "text": "所以我的同胞们，ass！",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 6,
+      "final": false,
+      "lag_seconds": 0.0940000000409782,
+      "since_started_seconds": 3.756000000052154,
+      "since_stream_start_seconds": 3.75
+    },
+    {
+      "text": "所以我的同胞们问",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 7,
+      "final": false,
+      "lag_seconds": 0.0779999999795109,
+      "since_started_seconds": 4.287000000011176,
+      "since_stream_start_seconds": 4.281
+    },
+    {
+      "text": "所以我的同胞们，问不要！",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 8,
+      "final": false,
+      "lag_seconds": 0.14099999994505197,
+      "since_started_seconds": 4.896999999997206,
+      "since_stream_start_seconds": 4.906
+    },
+    {
+      "text": "所以我的同胞们问不要什么你都是",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 10,
+      "final": false,
+      "lag_seconds": 0.14000000001396984,
+      "since_started_seconds": 5.989999999990687,
+      "since_stream_start_seconds": 5.984
+    },
+    {
+      "text": "所以我的同胞们问不要什么你的国家",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 11,
+      "final": false,
+      "lag_seconds": 0.125,
+      "since_started_seconds": 6.537000000011176,
+      "since_stream_start_seconds": 6.547
+    },
+    {
+      "text": "所以我的同胞们，不要问你们的国家能做什么。",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 12,
+      "final": false,
+      "lag_seconds": 0.14000000001396984,
+      "since_started_seconds": 7.084000000031665,
+      "since_stream_start_seconds": 7.078
+    },
+    {
+      "text": "所以我的同胞们，不要问你们的国家能为你做什么。",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 13,
+      "final": false,
+      "lag_seconds": 0.125,
+      "since_started_seconds": 7.631000000052154,
+      "since_stream_start_seconds": 7.641
+    },
+    {
+      "text": "所以我的同胞们，不要问你们的国家能为你做什么，而要问你们能为国家做些什么。",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 15,
+      "final": false,
+      "lag_seconds": 0.26500000001396984,
+      "since_started_seconds": 8.864999999990687,
+      "since_stream_start_seconds": 8.859
+    },
+    {
+      "text": "所以我的同胞们，不要问你们的国家能为你做什么，而要问你——",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 16,
+      "final": false,
+      "lag_seconds": 0.21799999999348074,
+      "since_started_seconds": 9.364999999990687,
+      "since_stream_start_seconds": 9.359
+    },
+    {
+      "text": "所以我的同胞们，不要问你们的国家能为你做什么，而要问你能为国家做什么。",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 17,
+      "final": false,
+      "lag_seconds": 0.1720000000204891,
+      "since_started_seconds": 9.881000000052154,
+      "since_stream_start_seconds": 9.875
+    },
+    {
+      "text": "所以我的同胞们，不要问你们的国家能为你们做什么，而要问你们能为自己的国家做些什么。",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 18,
+      "final": false,
+      "lag_seconds": 0.18799999996554106,
+      "since_started_seconds": 10.444000000017695,
+      "since_stream_start_seconds": 10.438
+    },
+    {
+      "text": "所以我的同胞们，不要问你们的国家能为你们做什么，而要问你们能为自己的国家做些什么。",
+      "revision": 0,
+      "utterance_id": 1,
+      "sequence": 20,
+      "final": true,
+      "lag_seconds": 0.062000000034458935,
+      "since_started_seconds": 11.412000000011176,
+      "since_stream_start_seconds": 11.422
+    }
+  ],
+  "asr_device": "cuda",
+  "translation_device": "GPU",
+  "startup_seconds": 9.578,
+  "first_caption_seconds": 1.031,
+  "median_processing_lag_seconds": 0.14
+}

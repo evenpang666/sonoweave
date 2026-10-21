@@ -1,0 +1,10 @@
+.venv/
+.cache/
+.runtime/
+__pycache__/
+.pytest_cache/
+build/
+dist/
+models/
+*.spec
+*.log

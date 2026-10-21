@@ -1,0 +1,17 @@
+{
+  "real_system_audio": true,
+  "network_blocked": true,
+  "audio_saved": false,
+  "duration_seconds": 60.91,
+  "ready_seconds": 10.69,
+  "update_count": 85,
+  "source_segments": 5,
+  "translated_segments": 5,
+  "source_chars": 1061,
+  "translated_chars": 348,
+  "median_steady_processing_lag": 0.141,
+  "max_stall_with_growing_source_seconds": 0,
+  "version": "0.3.0",
+  "steady_observation_seconds": 50,
+  "notes": "Actual user-authorized default-output audio. Raw test text and screen captures stay in ignored .cache; this public report contains counts and timings only."
+}

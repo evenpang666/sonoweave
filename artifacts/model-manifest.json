@@ -1,0 +1,12 @@
+[
+  {
+    "path": "models/base/model.bin",
+    "bytes": 145217532,
+    "sha256": "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9"
+  },
+  {
+    "path": "models/translation/Qwen3-1.7B-Q4_K_M.gguf",
+    "bytes": 1107409472,
+    "sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897"
+  }
+]
