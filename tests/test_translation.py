@@ -94,7 +94,7 @@ def test_model_failure_is_explicit_and_never_falls_back_to_web():
 
 def test_missing_model_reports_preparation_step(monkeypatch, tmp_path):
     monkeypatch.setattr("sonoweave.translation.translation_model_location", lambda: tmp_path / "missing.gguf")
-    with pytest.raises(TranslationError, match="PrepareModels"):
+    with pytest.raises(TranslationError, match="prepare_models.py"):
         Translator()
 
 

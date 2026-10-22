@@ -105,7 +105,7 @@ def load_recognizer():
 
     path = model_location()
     if not (Path(path) / "model.bin").is_file():
-        raise RuntimeError("缺少离线语音模型，请先运行 PrepareModels.bat")
+        raise RuntimeError("缺少离线语音模型，请重新启动以下载，或运行 tools/prepare_models.py")
     configure_cuda()
     device = os.environ.get("SONOWEAVE_ASR_DEVICE", "auto")
     if device != "cpu" and ctranslate2.get_cuda_device_count() > 0:

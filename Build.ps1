@@ -1,7 +1,11 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
-if (-not (Test-Path -LiteralPath $python)) { throw 'Run Install.bat first.' }
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tools\bootstrap.ps1') -Ensure -Backend auto
+if ($LASTEXITCODE -ne 0) { throw 'Environment setup failed.' }
+# uv-created application environments do not include pip by default.
+& $python -m ensurepip
+if ($LASTEXITCODE -ne 0) { throw 'pip bootstrap failed.' }
 & $python -m pip install -r requirements-dev.txt
 if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
 $bundlePath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'dist\SonoWeave'))

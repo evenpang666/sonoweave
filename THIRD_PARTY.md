@@ -4,6 +4,7 @@
 
 - [PySide6 / Qt](https://doc.qt.io/qtforpython-6/licenses.html)：LGPLv3/GPLv3 或商业许可。此分发使用动态链接的未修改 Qt 库，库文件位于 `_internal/PySide6`。许可证与第三方通知见 `licenses`；源代码与许可信息见官方链接及 [Qt 6.8.3 源码](https://download.qt.io/archive/qt/6.8/6.8.3/single/)。
 - [SoundCard](https://github.com/bastibe/SoundCard)：BSD-3-Clause。
+- [pulsectl](https://github.com/mk-fg/python-pulse-control)：MIT，Linux 上查询默认输出对应的 monitor 源；通过动态链接的系统 libpulse 访问 PulseAudio / pipewire-pulse，系统组件遵循各自许可证。
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper)：MIT。
 - [CTranslate2](https://github.com/OpenNMT/CTranslate2)：MIT。
 - [Whisper](https://github.com/openai/whisper)：代码及模型权重为 MIT；自动下载 [Systran/faster-whisper-small](https://huggingface.co/Systran/faster-whisper-small) 的 CTranslate2 转换版本，版本 536b0662742c02347bc0e980a01041f333bce120。
@@ -15,5 +16,6 @@
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime)：MIT。
 - [PyAV](https://github.com/PyAV-Org/PyAV)：BSD-3-Clause；其 FFmpeg 库遵循各自许可证，详情见打包的 PyAV 许可信息。
 - [PyInstaller](https://pyinstaller.org/en/stable/license.html)：GPL 及允许生成非 GPL 应用的引导程序例外。
+- [uv](https://github.com/astral-sh/uv)：MIT / Apache-2.0，源码安装时按需下载；托管 Python 来自 [python-build-standalone](https://github.com/astral-sh/python-build-standalone)，CPython 及所含组件遵循各自许可证。安装器不把这些运行环境文件纳入 Git。
 
 完整组件版本可参见 `requirements-installed.txt`，许可原文位于 `licenses`。此版本不使用在线翻译服务。

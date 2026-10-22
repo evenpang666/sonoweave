@@ -1,0 +1,45 @@
+name: Linux
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        backend: ['cpu', 'vulkan']
+    env:
+      QT_QPA_PLATFORM: offscreen
+      SONOWEAVE_TEST_PULSE: '1'
+      SONOWEAVE_HOME: ${{ github.workspace }}/.cache/ci-home
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries and isolated audio server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpulse-dev pulseaudio pulseaudio-utils libegl1 libgl1 libvulkan1 \
+            libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1 libxcb-image0 \
+            libxcb-render-util0 fonts-noto-cjk
+          pulseaudio -n --daemonize=yes --exit-idle-time=-1 --load=module-native-protocol-unix
+          pactl info
+      - name: Installer and launcher routing
+        run: bash tools/check_linux_scripts.sh
+      - name: Install with Linux entry point
+        run: |
+          if [[ '${{ matrix.backend }}' == cpu ]]; then bash Install.sh --cpu; else bash Install.sh; fi
+      - name: Unit tests and real monitor capture
+        run: |
+          .venv-linux/bin/python -m ensurepip
+          .venv-linux/bin/python -m pip install 'pytest>=8,<10'
+          .venv-linux/bin/python -m pytest -q
+      - name: Launch preview through Linux entry point
+        run: |
+          mkdir -p artifacts
+          bash Start.sh --screenshot artifacts/linux-preview.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-preview-${{ matrix.backend }}
+          path: artifacts/linux-preview.png

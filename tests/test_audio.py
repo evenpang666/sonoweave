@@ -5,7 +5,8 @@ import threading
 from types import SimpleNamespace
 
 import numpy as np
-from sonoweave.audio import FRAME_SAMPLES, SAMPLE_RATE, StreamingSegmenter, capture_loopback
+import pytest
+from sonoweave.audio import FRAME_SAMPLES, SAMPLE_RATE, StreamingSegmenter, capture_loopback, _loopback_microphone
 
 
 def frame(value=0):
@@ -120,3 +121,102 @@ def test_backend_import_before_manual_com_initialization(monkeypatch):
     stop.set()
     capture_loopback(stop, lambda audio: None, lambda text, error: None)
     assert initialized == [True] and released == [True]
+
+
+def linux_pulse(monkeypatch, sinks):
+    class Pulse:
+        def __init__(self, name, connect):
+            assert connect is False
+
+        def connect(self, timeout):
+            assert timeout == 2
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def sink_list(self):
+            return [SimpleNamespace(name=name, monitor_source_name=monitor) for name, monitor in sinks]
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "pulsectl", SimpleNamespace(Pulse=Pulse))
+
+
+def test_linux_capture_uses_exact_monitor_and_reconnects_default_output(monkeypatch):
+    linux_pulse(monkeypatch, [("headphones", "custom.monitor.one"), ("speakers", "custom.monitor.two")])
+    stop = threading.Event()
+    samples = 0
+    monitors, windows, statuses = [], [], []
+
+    class Recorder:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def record(self, numframes):
+            nonlocal samples
+            samples += numframes
+            return frame(0.1)
+
+    def microphone(id, include_loopback):
+        assert include_loopback
+        monitors.append(id)
+        return SimpleNamespace(id=id, isloopback=True, recorder=lambda **kwargs: Recorder())
+
+    sc = SimpleNamespace(
+        default_speaker=lambda: SimpleNamespace(id="headphones" if samples < 2 * SAMPLE_RATE else "speakers"),
+        get_microphone=microphone,
+    )
+    monkeypatch.setitem(sys.modules, "soundcard", sc)
+    monkeypatch.setattr("sonoweave.audio.time", SimpleNamespace(monotonic=lambda: samples / SAMPLE_RATE))
+
+    def receive(window):
+        windows.append(window)
+        if len(monitors) == 2:
+            stop.set()
+
+    capture_loopback(stop, receive, lambda text, error: statuses.append((text, error)))
+    assert monitors == ["custom.monitor.one", "custom.monitor.two"]
+    assert len({window.utterance_id for window in windows}) == 2
+    assert all(not error for text, error in statuses)
+
+
+@pytest.mark.parametrize("actual_id,is_loopback", [("physical-mic", False), ("monitor", False), ("other.monitor", True)])
+def test_linux_never_records_fuzzy_or_physical_microphone(monkeypatch, actual_id, is_loopback):
+    linux_pulse(monkeypatch, [("output", "monitor")])
+    sc = SimpleNamespace(get_microphone=lambda **kwargs: SimpleNamespace(id=actual_id, isloopback=is_loopback))
+    with pytest.raises(RuntimeError, match="monitor is unavailable"):
+        _loopback_microphone(sc, SimpleNamespace(id="output"))
+
+
+def test_linux_missing_monitor_reports_service_hint_without_recording(monkeypatch):
+    linux_pulse(monkeypatch, [])
+    monkeypatch.setitem(sys.modules, "soundcard", SimpleNamespace(default_speaker=lambda: SimpleNamespace(id="gone")))
+    stop = threading.Event()
+    statuses = []
+
+    def receive_status(text, error):
+        statuses.append((text, error))
+        stop.set()
+
+    capture_loopback(stop, lambda audio: pytest.fail("must not record a mic"), receive_status)
+    assert statuses and statuses[0][1] and "pipewire-pulse" in statuses[0][0]
+
+
+def test_linux_backend_load_failure_has_actionable_hint(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    original_import = builtins.__import__
+
+    def failed_import(name, *args, **kwargs):
+        if name == "soundcard":
+            raise OSError("missing libpulse")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", failed_import)
+    statuses = []
+    capture_loopback(threading.Event(), lambda audio: None, lambda text, error: statuses.append((text, error)))
+    assert statuses[0][1] and "libpulse" in statuses[0][0]

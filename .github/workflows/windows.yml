@@ -1,0 +1,25 @@
+name: Windows environment
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+      SONOWEAVE_HOME: ${{ github.workspace }}/.cache/ci-home
+    steps:
+      - uses: actions/checkout@v4
+      - name: Automatic uv, Python and dependency installation
+        shell: cmd
+        run: Install.bat
+      - name: Tests and preview
+        shell: pwsh
+        run: |
+          .venv/Scripts/python.exe -m ensurepip
+          .venv/Scripts/python.exe -m pip install 'pytest>=8,<10'
+          .venv/Scripts/python.exe -m pytest -q
+          .venv/Scripts/python.exe tools/bootstrap.py --check
+          .venv/Scripts/python.exe main.py --screenshot .cache/windows-preview.png

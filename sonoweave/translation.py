@@ -191,7 +191,7 @@ class Translator:
         path = Path(model_path) if model_path is not None else translation_model_location()
         self.family = "hunyuan" if "hy-mt" in path.name.lower() else "qwen"
         if not path.is_file():
-            raise TranslationError("缺少离线翻译模型，请先运行 PrepareModels.bat")
+            raise TranslationError("缺少离线翻译模型，请重新启动以下载，或运行 tools/prepare_models.py")
         try:
             from llama_cpp import Llama, llama_supports_gpu_offload
             use_gpu = os.environ.get("SONOWEAVE_TRANSLATE_DEVICE", "auto") != "cpu" and llama_supports_gpu_offload()

@@ -1,23 +1,14 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-where python >nul 2>nul
-if errorlevel 1 (
-    echo Please install 64-bit Python 3.11 or 3.12, and add Python to PATH.
-    pause
-    exit /b 1
-)
-if not exist ".venv\Scripts\python.exe" python -m venv .venv
-if not exist ".venv\Scripts\python.exe" goto failed
-".venv\Scripts\python.exe" -m ensurepip --upgrade
-if errorlevel 1 goto failed
-".venv\Scripts\python.exe" -m pip install -r requirements.txt
-if errorlevel 1 goto failed
-echo Installation complete. Run Start.bat; missing models download automatically on first use.
-echo Optional: run PrepareModels.bat --model both to pre-download both translation models.
-pause
+set "OPTIONS=-Backend vulkan"
+if "%~1"=="--cpu" set "OPTIONS=-Backend cpu"
+if "%~1"=="--ensure" set "OPTIONS=-Backend auto -Ensure"
+if not "%~2"=="" goto usage
+if not "%~1"=="" if not "%~1"=="--cpu" if not "%~1"=="--ensure" goto usage
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "tools\bootstrap.ps1" %OPTIONS%
+if errorlevel 1 exit /b 1
 exit /b 0
-:failed
-echo Installation failed. Check Python and your network connection.
-pause
-exit /b 1
+:usage
+echo Usage: Install.bat [--cpu]
+exit /b 2

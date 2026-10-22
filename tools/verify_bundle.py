@@ -10,7 +10,7 @@ folder = root / ".cache" / f"bundle-test-{time.time_ns()}"
 folder.mkdir(parents=True, exist_ok=True)
 env = os.environ.copy()
 env.update(QT_QPA_PLATFORM="offscreen", SONOWEAVE_HOME=str(folder), HF_HOME=str(folder / "huggingface"))
-exe = root / "dist" / "SonoWeave" / "SonoWeave.exe"
+exe = root / "dist" / "SonoWeave" / ("SonoWeave.exe" if sys.platform == "win32" else "SonoWeave")
 image = folder / "preview.png"
 subprocess.run([str(exe), "--screenshot", str(image)], env=env, check=True, timeout=30)
 assert image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")

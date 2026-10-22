@@ -43,7 +43,14 @@ def _model_path(relative: Path) -> Path:
 
 def data_dir() -> Path:
     override = os.environ.get("SONOWEAVE_HOME")
-    root = Path(override) if override else Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "SonoWeave"
+    if override:
+        root = Path(override)
+    elif sys.platform == "linux":
+        xdg = os.environ.get("XDG_DATA_HOME", "")
+        base = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "share"
+        root = base / "sonoweave"
+    else:
+        root = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "SonoWeave"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

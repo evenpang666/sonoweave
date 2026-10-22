@@ -14,6 +14,8 @@ def main() -> int:
     parser.add_argument("--preview", action="store_true", help="仅预览字幕界面，不采集声音")
     parser.add_argument("--screenshot", type=Path, help="预览后保存界面截图并退出")
     args = parser.parse_args()
+    from sonoweave.desktop import configure_qt_platform
+    configure_qt_platform()
     from PySide6.QtCore import QLockFile, QObject, QTimer, Signal, Slot
     from PySide6.QtGui import QFontDatabase
     from PySide6.QtWidgets import QApplication

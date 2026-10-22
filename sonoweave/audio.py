@@ -100,9 +100,28 @@ class StreamingSegmenter:
         return result
 
 
+def _loopback_microphone(sc, speaker):
+    if sys.platform == "linux":
+        import pulsectl
+
+        # Query the sink -> monitor relationship. Monitor names can be customized,
+        # and SoundCard's fuzzy matching must never fall back to a physical mic.
+        with pulsectl.Pulse("SonoWeave-monitor", connect=False) as pulse:
+            pulse.connect(timeout=2)
+            sink = next((item for item in pulse.sink_list() if item.name == speaker.id), None)
+            if sink is None or not sink.monitor_source_name:
+                raise RuntimeError("Default output has no monitor source")
+            monitor_id = sink.monitor_source_name
+        microphone = sc.get_microphone(id=monitor_id, include_loopback=True)
+        if microphone.id != monitor_id or not microphone.isloopback:
+            raise RuntimeError("Default output monitor is unavailable")
+        return microphone
+    return sc.get_microphone(id=str(speaker.id), include_loopback=True)
+
+
 def capture_loopback(stop: threading.Event, on_audio: Callable, on_status: Callable) -> None:
-    if sys.platform != "win32":
-        on_status("系统声音采集目前仅支持 Windows 10 / 11", True)
+    if sys.platform not in ("win32", "linux"):
+        on_status("系统声音采集支持 Windows 和 Linux（PulseAudio / PipeWire）", True)
         return
     import ctypes
     initialized = False
@@ -110,14 +129,15 @@ def capture_loopback(stop: threading.Event, on_audio: Callable, on_status: Calla
         # SoundCard rejects COM's S_FALSE on first import. Import before taking
         # this worker's own reference; subsequent capture threads still need it.
         import soundcard as sc
-        initialized = ctypes.windll.ole32.CoInitializeEx(None, 0) in (0, 1)
+        if sys.platform == "win32":
+            initialized = ctypes.windll.ole32.CoInitializeEx(None, 0) in (0, 1)
         while not stop.is_set():
             segmenter = StreamingSegmenter()
             try:
                 speaker = sc.default_speaker()
                 if speaker is None:
                     raise RuntimeError("No default output device")
-                microphone = sc.get_microphone(id=str(speaker.id), include_loopback=True)
+                microphone = _loopback_microphone(sc, speaker)
                 with microphone.recorder(samplerate=SAMPLE_RATE, blocksize=2048) as recorder:
                     on_status("正在聆听系统声音 · 离线", False)
                     next_check = time.monotonic() + 2
@@ -132,11 +152,15 @@ def capture_loopback(stop: threading.Event, on_audio: Callable, on_status: Calla
                             next_check = time.monotonic() + 2
             except Exception:
                 log.exception("System audio capture failed")
-                on_status("无法采集系统声音，正在重连音频设备…", True)
+                message = ("无法采集系统声音，请检查 PulseAudio / pipewire-pulse，正在重连…"
+                           if sys.platform == "linux" else "无法采集系统声音，正在重连音频设备…")
+                on_status(message, True)
                 stop.wait(2)
     except Exception:
         log.exception("Audio backend failed")
-        on_status("音频组件无法启动，请右键重试", True)
+        message = ("音频组件无法启动，请检查 libpulse 和 PulseAudio / pipewire-pulse 后重连"
+                   if sys.platform == "linux" else "音频组件无法启动，请右键重试")
+        on_status(message, True)
     finally:
         if initialized:
             ctypes.windll.ole32.CoUninitialize()

@@ -1,3 +1,3 @@
-"""A small Windows system-audio translation overlay."""
+"""A small Windows and Linux system-audio translation overlay."""
 
-__version__ = "0.5.2"
+__version__ = "0.6.1"

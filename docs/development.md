@@ -2,14 +2,18 @@
 
 ## 从源码安装
 
-需要 64 位 Python 3.11 或 3.12。
+无需提前安装 Python。安装器自动准备 uv、托管 Python 3.12 和独立环境，详见 [自动安装](installation.md)。
 
-1. 双击 `Install.bat` 安装依赖。此步需要网络。
-2. 双击 `Start.bat`，程序自动下载缺少的识别模型和当前选择的翻译模型。此步首次需要网络，完成后可断网使用。
+以下命令用于 Windows。Linux 的依赖、安装、测试和打包见 [Linux 安装与使用](linux.md)，使用独立的 `.venv-linux` 环境。
+
+1. 双击 `Start.bat`，缺少或损坏的运行环境会先自动安装，再启动字幕。也可先运行 `Install.bat` 仅安装环境；首次需要网络。
+2. 程序自动下载缺少的识别模型和当前选择的翻译模型；完成后可断网使用。
 3. 可选：提前运行 `PrepareModels.bat` 下载默认组合；`PrepareModels.bat --model 2b` 下载 2B 组合，`PrepareModels.bat --model both` 提前准备两种翻译模型。
 
 ```powershell
 .venv\Scripts\python.exe main.py
+.venv\Scripts\python.exe -m ensurepip
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .venv\Scripts\python.exe -m pytest -q
 .venv\Scripts\python.exe tools\smoke.py
 .venv\Scripts\python.exe tools\quality_check.py
@@ -42,7 +46,7 @@
 ## 仓库与产物
 
 - 提交源码、自动化测试、依赖声明和维护文档。`tests/`、`tools/` 保留跟踪。
-- 不提交模型、缓存、构建目录、运行日志、测试截图、验证数据或本机 `pip freeze` 快照。`artifacts/`、`.cache/`、`.runtime/`、`models/`、`build/`、`dist/` 均由 `.gitignore` 排除。
+- 不提交模型、缓存、虚拟环境、构建目录、运行日志、测试截图、验证数据或本机 `pip freeze` 快照。`.venv/`、`.venv-linux/`、`artifacts/`、`.cache/`、`.runtime/`、`models/`、`build/`、`dist/` 均由 `.gitignore` 排除。
 - 历史验证文档和清理前的 README 仅作本地归档，位于 `docs/archive/verification/`，该目录同样忽略。测试脚本按需创建输出目录，干净检出不需要携带历史产物。
 - 打包复制 README、维护文档及许可通知，不复制验证产物和模型权重。打包目录内的 `requirements-installed.txt` 由构建时生成。
 - `.gitignore` 不会自动取消已有跟踪；排除已跟踪产物需使用 `git rm --cached`，保留本地文件。历史提交不会因此被改写。

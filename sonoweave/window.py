@@ -54,7 +54,7 @@ class CaptionWindow(QWidget):
         self.resize(860, 174)
         self.setMouseTracking(True)
         self.setStyleSheet("""
-            QWidget { font-family: 'Segoe UI', 'Microsoft YaHei UI'; }
+            QWidget { font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Noto Sans CJK SC', 'Noto Sans', sans-serif; }
             QFrame#surface { background: rgba(19, 23, 30, 242); border: 1px solid rgba(255,255,255,28); border-radius: 20px; }
             QLabel { background: transparent; border: none; color: #F3F5FA; }
             QLabel#status { color: #9BA6B7; font-size: 11px; }
@@ -84,7 +84,9 @@ class CaptionWindow(QWidget):
         header.addWidget(self.language_label)
         layout.addLayout(header)
         self.caption_label = QLabel("让每一句，都听得懂。")
-        self.caption_label.setFont(QFont("Microsoft YaHei UI", 23, QFont.Weight.Medium))
+        font = QFont("Microsoft YaHei UI", 23, QFont.Weight.Medium)
+        font.setFamilies(["Microsoft YaHei UI", "Noto Sans CJK SC", "Noto Sans", "DejaVu Sans"])
+        self.caption_label.setFont(font)
         self.caption_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.caption_label.setWordWrap(True)
         self.caption_label.setTextFormat(Qt.TextFormat.PlainText)
