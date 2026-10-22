@@ -7,13 +7,18 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="声屿 SonoWeave · 离线实时翻译字幕")
+    parser = argparse.ArgumentParser(description="声屿 SonoWeave · 实时翻译字幕")
     parser.add_argument("--preview", action="store_true", help="仅预览字幕界面，不采集声音")
     parser.add_argument("--screenshot", type=Path, help="预览后保存界面截图并退出")
+    parser.add_argument("--check-devices", type=Path, help="检查模型设备并保存 JSON，不采集声音")
     args = parser.parse_args()
+    if args.check_devices:
+        from sonoweave.diagnostics import write_resource_report
+        return write_resource_report(args.check_devices)
     from sonoweave.desktop import configure_qt_platform
     configure_qt_platform()
     from PySide6.QtCore import QLockFile, QObject, QTimer, Signal, Slot
@@ -32,7 +37,6 @@ def main() -> int:
     app.setOrganizationName("SonoWeave")
     app.setQuitOnLastWindowClosed(True)
     root = data_dir()
-    os.environ.setdefault("HF_HOME", str(root / "huggingface"))
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     handler = RotatingFileHandler(root / "app.log", maxBytes=1024 * 1024, backupCount=2, encoding="utf-8")
@@ -41,7 +45,11 @@ def main() -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     lock = QLockFile(str(root / "app.lock"))
     if not args.preview and not args.screenshot and not lock.tryLock(100):
+        handler.close()
+        logging.getLogger().removeHandler(handler)
         return 0
+    from sonoweave.session import SessionCache
+    session_cache = SessionCache(root)
     settings = Settings()
     window = CaptionWindow(settings)
     class Controller(QObject):
@@ -56,7 +64,7 @@ def main() -> int:
             self.closing = False
             self.retiring_engine = None
             self.preparation_lock = threading.Lock()
-            self.engine_status = ("正在加载离线识别与翻译模型…", False)
+            self.engine_status = ("正在加载识别与翻译模型…", False)
             self.preparation_status.connect(self.receive_preparation_status)
             self.preparation_finished.connect(self.receive_preparation_finished)
             self.health_timer = QTimer(self)
@@ -101,7 +109,7 @@ def main() -> int:
             selected = settings.model
             speaker_colors = settings.speaker_colors
             window.set_translation_status("")
-            window.set_status(f"正在准备 {selected.upper()} 离线模型…")
+            window.set_status(f"正在准备 {selected.upper()} 模型…")
 
             def run():
                 from sonoweave.models import DownloadCancelled, ensure_models
@@ -175,10 +183,20 @@ def main() -> int:
 
         @Slot()
         def stop(self):
+            if self.closing:
+                return
             self.closing = True
+            self.health_timer.stop()
             self.cancel_download.set()
-            if self.engine:
-                self.engine.stop()
+            engines = tuple(dict.fromkeys(engine for engine in (self.engine, self.retiring_engine) if engine))
+            for engine in engines:
+                engine.stop()
+            deadline = time.monotonic() + 2
+            for engine in engines:
+                engine.wait_stopped(timeout=max(0, deadline - time.monotonic()))
+                engine.clear_session()
+            self.engine = self.retiring_engine = None
+            window.clear_session()
 
     controller = Controller()
     window.retry_requested.connect(controller.start)
@@ -186,7 +204,7 @@ def main() -> int:
     window.speaker_colors_changed.connect(controller.switch_speaker_colors)
     window.show()
     if args.preview or args.screenshot:
-        window.set_status("正在聆听系统声音 · 离线")
+        window.set_status("正在聆听系统声音")
         window.set_caption("世界的声音，就在眼前。\n让每一句话，都跨越语言的距离。")
         if args.screenshot:
             def screenshot():
@@ -197,7 +215,15 @@ def main() -> int:
     else:
         QTimer.singleShot(100, controller.start)
     app.aboutToQuit.connect(controller.stop)
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        controller.stop()
+        window.clear_session()
+        session_cache.close()
+        lock.unlock()
+        handler.close()
+        logging.getLogger().removeHandler(handler)
 
 
 if __name__ == "__main__":

@@ -24,14 +24,14 @@ sudo apt install curl libpulse0 libpulse-dev pulseaudio-utils \
 
 安装器创建 `.venv-linux`，与 Windows 的 `.venv` 分开，Python 由 uv 下载到项目 `.runtime/linux/python`，无需设置 `PYTHON` 或激活环境。脚本支持包含空格的项目路径，可从其他工作目录调用。详细流程与网络配置见 [自动安装](installation.md)。
 
-默认安装固定版本的 Vulkan 推理轮子，支持相应驱动可用时的 GPU 翻译；识别端自动尝试 NVIDIA CUDA，失败时退回 CPU。没有兼容 GPU、Vulkan 库加载失败，或希望完全使用 CPU 时：
+默认检测 NVIDIA 驱动，兼容时优先安装固定版本的 CUDA 12.4 推理轮子，否则使用 Vulkan；识别端优先尝试 NVIDIA CUDA。两个模型根据空闲显存分配 GPU / CPU，加载或运行中显存不足时回退 CPU，详见 [资源分配](resources.md)。没有兼容 GPU、GPU 库加载失败，或希望完全使用 CPU 时：
 
 ```bash
 bash Install.sh --cpu
 SONOWEAVE_ASR_DEVICE=cpu SONOWEAVE_TRANSLATE_DEVICE=cpu bash Start.sh
 ```
 
-`--cpu` 选择 CPU 翻译轮子；再次运行不带该选项的安装器可切回 Vulkan。安装器不会下载模型。首次启动按需下载 Whisper small 和默认 4B；切换 2B 时自动下载，已有完整模型复用。也可以提前准备：
+`--cpu` 选择 CPU 翻译轮子；使用 `--cuda` 或 `--vulkan` 可显式切换后端。安装器不会下载模型。首次启动按需下载 Whisper small 和默认 4B；切换 2B 时自动下载，已有完整模型复用。也可以提前准备：
 
 ```bash
 bash PrepareModels.sh --model both

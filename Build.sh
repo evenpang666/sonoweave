@@ -8,10 +8,9 @@ fi
 python=.venv-linux/bin/python
 bash Install.sh --ensure
 "$python" -m ensurepip
-"$python" -m pip install -r requirements-dev.txt
-"$python" -m PyInstaller --noconfirm --windowed --onedir --name SonoWeave \
-    --collect-data soundcard --collect-all pulsectl --collect-all faster_whisper \
-    --collect-all ctranslate2 --collect-all sherpa_onnx --collect-all onnxruntime --collect-all llama_cpp --collect-data certifi main.py
+# Preserve the runtime backend selected by Install.sh --ensure.
+"$python" -m pip --disable-pip-version-check install 'pyinstaller>=6.10,<7'
+"$python" tools/build_bundle.py
 cp -- README.md LICENSE THIRD_PARTY.md dist/SonoWeave/
 mkdir -p dist/SonoWeave/docs/assets
 cp -- docs/*.md dist/SonoWeave/docs/

@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 import sys
 
+DEFAULT_FONT_SIZE = 16
+DEFAULT_CAPTION_LINES = 2
+
 LANGUAGES = {
     "zh-CN": "简体中文", "zh-TW": "繁體中文", "en": "English",
     "ja": "日本語", "ko": "한국어", "fr": "Français", "de": "Deutsch",
@@ -80,8 +83,8 @@ class Settings:
         self.target = "zh-CN"
         self.model = "4b"
         self.speaker_colors = False
-        self.font_size = 23
-        self.caption_lines = 4
+        self.font_size = DEFAULT_FONT_SIZE
+        self.caption_lines = DEFAULT_CAPTION_LINES
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
             if isinstance(value, dict) and value.get("target") in LANGUAGES:

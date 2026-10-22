@@ -7,9 +7,15 @@
 | 安装并启动 | 双击 `Start.bat` | `bash Start.sh` |
 | 只安装运行环境 | `Install.bat` | `bash Install.sh` |
 | 安装 CPU 翻译后端 | `Install.bat --cpu` | `bash Install.sh --cpu` |
+| 安装 CUDA 翻译后端 | `Install.bat --cuda` | `bash Install.sh --cuda` |
+| 安装 Vulkan 翻译后端 | `Install.bat --vulkan` | `bash Install.sh --vulkan` |
 | 提前下载两种模型 | `PrepareModels.bat --model both` | `bash PrepareModels.sh --model both` |
 
 启动脚本先检查环境标记、依赖声明及实际导入情况，缺少环境、依赖变更或依赖损坏时才运行安装。安装失败会返回错误并停止启动，修复后可再次执行相同命令；环境完整时检查不联网，不因启动而更新依赖。已打包的程序包含 Python 运行时，直接运行对应原生可执行文件即可。
+
+Windows 和 Linux 的启动脚本在存在 `main.py` 时始终运行当前源码，项目内残留的旧 `dist/SonoWeave` 不会覆盖源码更新。需要使用打包版时直接打开 `dist/SonoWeave/SonoWeave.exe`（Windows）或 `dist/SonoWeave/SonoWeave`（Linux）；源码更新后需重新运行对应的 `Build.ps1` / `Build.sh` 才能更新该程序。只有不含 `main.py` 时，启动脚本才回退到已有打包程序。
+
+两端均可右键开启“人声配色”，默认关闭；首次开启自动准备人声分段与声纹模型，约 30 MB。配色仅用于轮流说话，暂不处理多人同时说话。需要提前离线准备时，运行 `PrepareModels.bat --speaker-colors` 或 `bash PrepareModels.sh --speaker-colors`。
 
 ## 安装流程
 
@@ -19,7 +25,9 @@
 4. Linux 在 Debian / Ubuntu 上检查系统包，缺少时通过 apt 自动安装音频客户端库、Qt 桌面库、字体和所选后端运行库，可能需要 sudo 密码；沿用已运行的 PulseAudio / pipewire-pulse，不自动替换音频服务。其他发行版缺少系统库时提示手动补齐，详见 [Linux 说明](linux.md)。
 5. 使用 `uv pip install` 安装 Python 依赖，精确选择 CPU / Vulkan 的 llama.cpp 轮子；检查主要模块能否加载，通过后才原子写入就绪标记。并发安装通过系统文件锁串行执行。
 
-默认安装 Vulkan 后端；`--cpu` 可切到 CPU，再运行不带参数的安装器可切回 Vulkan。启动自动补装时会保留之前的后端选择。依赖完整并且声明未变化时，重复安装直接复用。程序启动后再按需下载模型；环境安装不下载多 GB 模型。
+默认检测 NVIDIA 驱动，兼容时优先安装固定版本的 CUDA 12.4 llama.cpp 轮子；否则使用 Vulkan。`--cuda`、`--vulkan`、`--cpu` 可显式选择翻译后端，后续自动补装保留该选择。早期的 CPU 安装同样保留。Whisper 的设备选择独立于翻译后端；需要强制两个模型都用 CPU 时，同时设置 `SONOWEAVE_ASR_DEVICE=cpu` 和 `SONOWEAVE_TRANSLATE_DEVICE=cpu`。依赖完整并且声明未变化时，重复安装直接复用。程序启动后再按需下载模型；环境安装不下载多 GB 模型。
+
+Whisper 的 CUDA 推理还需要 CUDA 12 的 cuBLAS 和 cuDNN 9。Windows 可复用 CUDA 安装目录及 `PATH` 中的 DLL；程序也会搜索 CUDA 轮子和打包目录内的运行库。Linux 需在启动 Python 前配置相应的系统库或 `LD_LIBRARY_PATH`。库缺少、GPU 不可用或显存不足时自动回退 CPU，字幕仍可使用。分配策略和验证方式见 [GPU 与 CPU 资源分配](resources.md)。
 
 ## 网络、空间与排错
 

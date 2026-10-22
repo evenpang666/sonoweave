@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, Signal
 from .audio import capture_loopback
 from .config import LANGUAGES
 from .recognition import AdaptiveDecoding, LanguageTracker, load_recognizer
+from .sentences import sentence_speakers
 from .streaming import CaptionRun, CaptionUpdate, LatestQueue, SourceChunk, TextJob, TimedWord, TranscriptCache, TranslationCache, slice_runs
 from .speakers import SpeakerRegistry, SpeakerTracker, SpeechSeparator, align_speakers
 from .translation import TranslationCancelled, TranslationError, Translator, UntranslatedOutput
@@ -56,21 +57,47 @@ class CaptionEngine(QObject):
         self.recognition_active_since = None
         self.recognition_stall_seconds = 8
         self.last_caption_at = 0.0
+        self.caption_rewrite_interval = 1.2
+        self.last_caption_utterance = None
+        self.pending_caption = None
+        self.pending_caption_at = 0.0
         self.translation_stall_seconds = 8
         self.stall_notified = False
+        self.recognition_loaded = threading.Event()
+        self.coordinate_startup = False
 
     def start(self):
         if self.threads:
             return
-        self.status.emit("正在加载离线识别与翻译模型…", False)
+        self.status.emit("正在加载识别与翻译模型…", False)
+        self.coordinate_startup = True
         for name, function in (("system-audio", self._capture), ("recognition", self._recognize),
-                               ("speakers", self._diarize), ("overlap", self._separate), ("translation", self._translate)):
+                               ("speakers", self._diarize), ("translation", self._translate)):
             thread = threading.Thread(name=name, target=function, daemon=True)
             self.threads.append(thread)
             thread.start()
 
     def stop(self):
         self.stop_event.set()
+
+    def clear_session(self):
+        """Discard session audio, text and voice identities after requesting stop."""
+        self.stop()
+        with self.lock:
+            for queue in (self.audio_queue, self.speaker_queue, self.overlap_queue, self.text_queue):
+                queue.clear()
+            self.source_cache.chunks.clear()
+            self.source_cache.version = 0
+            self.translation_cache.clear()
+            self.speaker_windows.clear()
+            self.speaker_audio.clear()
+            self.overlap_scheduled.clear()
+            self.overlap_applied.clear()
+            self.pending_repairs.clear()
+            self.speaker_registry = SpeakerRegistry()
+            self.last_job = self.last_published = None
+            self.last_caption_utterance = None
+            self.pending_caption = None
 
     def wait_stopped(self, timeout=8, cancelled=lambda: False):
         deadline = time.monotonic() + timeout
@@ -86,6 +113,7 @@ class CaptionEngine(QObject):
         if self.stop_event.is_set():
             return
         now = time.monotonic() if now is None else now
+        self._flush_pending_caption(now)
         with self.lock:
             since = self.translation_active_since
             dead = next((thread.name for thread in self.threads
@@ -166,7 +194,7 @@ class CaptionEngine(QObject):
             if self.last_job:
                 self.last_job = replace(self.last_job, target=self.target, revision=self.revision)
                 self.text_queue.put("recent-transcript", self.last_job)
-        self.status.emit("正在切换离线翻译模型…", False)
+        self.status.emit("正在切换翻译模型…", False)
 
     def _component_status(self, name, text="", error=False, speaker_generation=None):
         with self.lock:
@@ -180,10 +208,10 @@ class CaptionEngine(QObject):
             if self.errors:
                 message, failed = next(iter(self.errors.values())), True
             elif {"recognition", "translation", "audio"} <= self.ready:
-                message, failed = "正在聆听系统声音 · 离线", False
+                message, failed = "正在聆听系统声音", False
             else:
                 pending = "翻译" if "translation" not in self.ready else "识别"
-                message, failed = f"正在加载离线{pending}模型…", False
+                message, failed = f"正在加载{pending}模型…", False
         self.status.emit(message, failed)
 
     def _recognize(self):
@@ -191,9 +219,14 @@ class CaptionEngine(QObject):
             model = load_recognizer()
         except Exception as exc:
             log.exception("Offline recognition initialization failed")
-            self._component_status("recognition", str(exc) if isinstance(exc, RuntimeError) else "离线识别模型加载失败，请右键重试", True)
+            self._component_status("recognition", str(exc) if isinstance(exc, RuntimeError) else "识别模型加载失败，请右键重试", True)
             return
+        finally:
+            # Qwen plans against the free VRAM after Whisper's full warmup.
+            self.recognition_loaded.set()
         if self.stop_event.is_set():
+            if callable(getattr(model, "close", None)):
+                model.close()
             return
         self._component_status("recognition")
         self.recognition_stall_seconds = 30 if getattr(getattr(model, "model", None), "device", None) == "cpu" else 8
@@ -241,6 +274,8 @@ class CaptionEngine(QObject):
                     language_tracker.observe(info.language, getattr(info, "language_probability", 0), window)
                 source = info.language
                 with self.lock:
+                    if self.stop_event.is_set():
+                        continue
                     if not self.speaker_colors or speaker_generation != self.speaker_generation:
                         words = ()
                         text = " ".join(part for part in parts if part).strip()
@@ -263,23 +298,22 @@ class CaptionEngine(QObject):
             finally:
                 with self.lock:
                     self.recognition_active_since = None
+                self.recognition_stall_seconds = 30 if getattr(getattr(model, "model", None), "device", None) == "cpu" else 8
+        if callable(getattr(model, "close", None)):
+            model.close()
 
     def _enqueue_audio(self, window):
-        self.audio_queue.put(window.utterance_id, window)
         with self.lock:
+            if self.stop_event.is_set():
+                return
+            self.audio_queue.put(window.utterance_id, window)
             if self.speaker_colors:
-                self.speaker_audio[window.utterance_id] = window
-                while len(self.speaker_audio) > 8:
-                    key = next(iter(self.speaker_audio))
-                    del self.speaker_audio[key]
-                    self.overlap_scheduled.pop(key, None)
-                    self.overlap_applied.pop(key, None)
-                if window.utterance_id in self.overlap_scheduled:
-                    self._schedule_overlap(window)
                 self.speaker_queue.put(window.utterance_id, window)
 
     def _queue_transcript(self, repair_id=None):
         """Called under lock for either new text or a speaker-only revision."""
+        if self.stop_event.is_set():
+            return
         recent = self.source_cache.recent()
         if not recent:
             return
@@ -342,10 +376,8 @@ class CaptionEngine(QObject):
                         del self.speaker_windows[next(iter(self.speaker_windows))]
                     changed = False
                     for key, (_, turns) in results.items():
-                        if sum(t.end - t.start for t in turns if t.overlap) >= 0.25:
-                            audio_window = self.speaker_audio.get(key)
-                            if audio_window is not None:
-                                self._schedule_overlap(audio_window)
+                        # Only sequential speech is colored. Overlap remains
+                        # unknown; never schedule separation or a second ASR.
                         chunk = self.source_cache.chunks.get(key)
                         if not chunk or not chunk.words or chunk.separated:
                             continue
@@ -364,7 +396,7 @@ class CaptionEngine(QObject):
                 log.exception("Speaker analysis failed; continuing with default caption color")
 
     def _schedule_overlap(self, window):
-        """Called under lock. Coalesce costly refinements without losing finals."""
+        """Experimental helper, disconnected from the caption pipeline."""
         previous = self.overlap_scheduled.get(window.utterance_id)
         if previous and (window.sequence <= previous[0] or
                          (not window.final and window.audio.size - previous[1] < 24000)):
@@ -468,6 +500,9 @@ class CaptionEngine(QObject):
             return True
 
     def _translate(self):
+        while self.coordinate_startup and not self.recognition_loaded.wait(0.1):
+            if self.stop_event.is_set():
+                return
         while not self.stop_event.is_set():
             with self.lock:
                 path, generation = self.model_path, self.model_generation
@@ -490,7 +525,7 @@ class CaptionEngine(QObject):
             return
         if generation == self.model_generation and not self.stop_event.is_set():
             self._component_status("translation")
-        self.translation_stall_seconds = 30 if translator.device == "CPU" else 8
+        self.translation_stall_seconds = 30 if translator.device == "CPU" or str(translator.device).endswith("+CPU") else 8
         delivered = (-1, -1, -1, -1)
         try:
             while not self.stop_event.is_set() and generation == self.model_generation:
@@ -556,15 +591,16 @@ class CaptionEngine(QObject):
                 finally:
                     with self.lock:
                         self.translation_active_since = None
+                    self.translation_stall_seconds = 30 if translator.device == "CPU" or str(translator.device).endswith("+CPU") else 8
         finally:
             translator.close()
 
     def _translate_runs(self, translator, job, cancelled):
-        """Translate speaker turns independently, retaining the original paragraph layout."""
+        """Translate whole sentences, assigning one voice to each sentence."""
         flat, owners, ranges = [], [], []
         for index, part in enumerate(job.segments):
             start = len(flat)
-            for run in part.runs or (CaptionRun(part.text),):
+            for run in sentence_speakers(part.text, part.runs) or (CaptionRun(part.text),):
                 if run.text.strip():
                     flat.append(run)
                     owners.append(index)
@@ -619,9 +655,9 @@ class CaptionEngine(QObject):
             if complete:
                 self.pending_repairs.difference_update(part.utterance_id for part in segments)
             now = time.monotonic()
-            # The window owns the visual line limit; retain enough text to
-            # immediately reveal more lines or use a smaller font without ASR.
-            visible_runs = self.translation_cache.tail_runs(self.translation_cache.max_chars)
+            # The window selects whole sentences. Never truncate a sentence by
+            # character count or prepend an ellipsis before handing it to UI.
+            visible_runs = self.translation_cache.tail_runs(None)
             update = CaptionUpdate("".join(run.text for run in visible_runs), job.revision, job.utterance_id,
                                    job.sequence, job.final and complete, max(0, now - job.ended),
                                    max(0, now - job.started), self.source_cache.char_count,
@@ -629,9 +665,50 @@ class CaptionEngine(QObject):
                                    visible_runs)
             signature = (update.text, update.revision, update.final, update.runs)
             if signature == self.last_published:
+                self.pending_caption = None
                 return
+            # Keep appending new words immediately. Replacing a visible draft
+            # every ASR tick makes an otherwise fast translator hard to read.
+            # Final corrections, new utterances and language/model changes do
+            # not wait for the draft rewrite interval. The full cache continues
+            # updating even when an intermediate screen refresh is skipped.
+            if (self.last_published is not None and
+                    self.last_published[1] == update.revision and
+                    self.last_caption_utterance == update.utterance_id and
+                    update.text != self.last_published[0] and
+                    not update.text.startswith(self.last_published[0]) and
+                    not update.final and now - self.last_caption_at < self.caption_rewrite_interval):
+                self.pending_caption = update
+                self.pending_caption_at = now
+                return
+            self.pending_caption = None
             self.last_published = signature
             self.last_caption_at = now
+            self.last_caption_utterance = update.utterance_id
+        self._emit_caption(update)
+
+    def _flush_pending_caption(self, now):
+        """The existing one-second health tick also flushes the last held draft."""
+        with self.lock:
+            update = self.pending_caption
+            if update is None:
+                return
+            if self.stop_event.is_set() or update.revision != self.revision:
+                self.pending_caption = None
+                return
+            if now - self.last_caption_at < self.caption_rewrite_interval:
+                return
+            # The original processing lag excludes time intentionally held for display.
+            # Add only the time since this pending result was produced.
+            update = replace(update, lag_seconds=update.lag_seconds + max(0, now - self.pending_caption_at),
+                             since_started_seconds=update.since_started_seconds + max(0, now - self.pending_caption_at))
+            self.pending_caption = None
+            self.last_published = (update.text, update.revision, update.final, update.runs)
+            self.last_caption_at = now
+            self.last_caption_utterance = update.utterance_id
+        self._emit_caption(update)
+
+    def _emit_caption(self, update):
         self.caption.emit(update)
         log.info("Caption cache: source=%d translated=%d segments=%d lag=%.3fs",
                  update.source_chars, update.translation_chars, update.translated_segments, update.lag_seconds)

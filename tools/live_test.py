@@ -29,6 +29,7 @@ from sonoweave.config import Settings, translation_model_location
 from sonoweave.engine import CaptionEngine
 import sonoweave.engine as implementation
 from sonoweave.window import CaptionWindow
+from tools.caption_metrics import caption_metrics
 
 
 def no_network(*args, **kwargs):
@@ -40,7 +41,12 @@ def main():
     parser.add_argument("--seconds", type=float, default=90)
     parser.add_argument("--label", default="live")
     parser.add_argument("--model", choices=("4b", "2b"), default="4b")
+    parser.add_argument("--show", action="store_true", help="Show the live subtitle window")
     args = parser.parse_args()
+    if args.show:
+        os.environ.pop("QT_QPA_PLATFORM", None)
+        from sonoweave.desktop import configure_qt_platform
+        configure_qt_platform()
     app = QApplication([])
     if not QFontDatabase.families():
         fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
@@ -50,6 +56,9 @@ def main():
     window.show()
     model_path = translation_model_location(args.model)
     engine = CaptionEngine("zh-CN", model_path=str(model_path))
+    destination = ROOT / ".cache" / f"{args.label}-test"
+    destination.mkdir(parents=True, exist_ok=True)
+    events_file = (destination / "events.jsonl").open("w", encoding="utf-8")
     started = time.monotonic()
     ready_at = None
     updates = []
@@ -58,12 +67,15 @@ def main():
     history = []
     audio_windows, asr_events = [], []
     report = {"version": __version__, "translation_model": model_path.name, "asr_model": "Whisper small",
-              "real_system_audio": True, "network_blocked": True, "audio_saved": False}
+              "real_system_audio": True, "network_blocked": True, "audio_saved": False,
+              "speaker_colors": False, "requested_listening_seconds": args.seconds}
     enqueue = engine._enqueue_audio
 
     def observed_audio(window):
         audio_windows.append(dict(at=round(time.monotonic() - started, 3),
                                   utterance_id=window.utterance_id, sequence=window.sequence, final=window.final,
+                                  started=round(window.started - started, 3),
+                                  ended=round(window.ended - started, 3),
                                   rms=round(float(np.sqrt(np.mean(np.square(window.audio)))), 6)))
         enqueue(window)
 
@@ -105,9 +117,14 @@ def main():
         row = asdict(update)
         row["at"] = round(time.monotonic() - started, 3)
         row["visible_change"] = not updates or row["text"] != updates[-1]["text"]
+        row["display_text"] = window.caption_label.text()
+        row["display_change"] = not updates or row["display_text"] != updates[-1]["display_text"]
         with engine.lock:
             row["source_snapshot"] = [asdict(chunk) for chunk in engine.source_cache.snapshot()[-3:]]
+            row["translation_snapshot"] = engine.translation_cache.snapshot()
         updates.append(row)
+        events_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+        events_file.flush()
         if len(updates) % 10 == 0:
             print("CACHE", json.dumps({key: row[key] for key in (
                 "source_chars", "translation_chars", "translated_segments", "lag_seconds", "at")}), flush=True)
@@ -132,6 +149,7 @@ def main():
                 app.processEvents()
                 now = time.monotonic()
                 if now - last_sample >= 1:
+                    engine.check_health(now)
                     with engine.lock:
                         history.append(dict(at=round(now - started, 3), source_chars=engine.source_cache.char_count,
                                             source_segments=len(engine.source_cache.chunks),
@@ -150,11 +168,10 @@ def main():
             for thread in engine.threads:
                 thread.join(5)
         app.processEvents()
+    events_file.close()
     with engine.lock:
         sources = [asdict(chunk) for chunk in engine.source_cache.snapshot()]
         translations = engine.translation_cache.snapshot()
-    destination = ROOT / ".cache" / f"{args.label}-test"
-    destination.mkdir(parents=True, exist_ok=True)
     window.grab().save(str(destination / "captions.png"))
     window.hide()
     steady = [row["lag_seconds"] for row in updates if ready_at is not None and row["at"] >= ready_at - started + 5]
@@ -194,6 +211,7 @@ def main():
                   nonzero_audio_window_count=sum(row["rms"] > 0.0001 for row in audio_windows),
                   asr_event_count=len(asr_events),
                   beam3_event_count=sum(row["beam"] == 3 for row in asr_events),
+                  caption_metrics=caption_metrics(updates, audio_windows),
                   statuses=statuses, translation_errors=translation_errors, history=history, updates=updates,
                   source_cache=sources, translation_cache=translations, audio_windows=audio_windows, asr_events=asr_events)
     (destination / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

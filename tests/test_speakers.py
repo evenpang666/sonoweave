@@ -89,7 +89,8 @@ def test_translation_keeps_speaker_turns_in_same_paragraph_and_publishes_color_o
     engine.source_cache.relabel(1, recolored.runs)
     new_runs = ((CaptionRun("你好。", 1), CaptionRun(" "), CaptionRun("是的。", 0)),)
     engine._publish(job, (recolored,), translated, True, new_runs)
-    assert len(received) == 2 and received[-1].runs == new_runs[0]
+    assert len(received) == 2
+    assert received[-1].runs == (CaptionRun("你好。", 0), CaptionRun(" "), CaptionRun("是的。", 0))
     engine._publish(job, (part,), translated, True, runs)  # late old color must not return
     assert len(received) == 2
 
@@ -102,6 +103,20 @@ def test_colored_progress_cannot_shorten_an_existing_translation(app):
     engine.translation_cache.update((part,), ("第一句。第二句。",), {1})
     engine._publish(job, (part,), ("第一句。",), False, ((CaptionRun("第一句。", 1),),))
     assert engine.translation_cache.tail() == "第一句。第二句。"
+
+
+def test_word_level_identity_jitter_does_not_fragment_translation(app):
+    engine = CaptionEngine("zh-CN", speaker_colors=True)
+    part = SourceChunk(1, "Are you ready? Yes!", "en", 1, True, 0, 3,
+                       (CaptionRun("Are you ", 0), CaptionRun("ready", 1),
+                        CaptionRun("?", 0), CaptionRun(" Yes!", 1)))
+    job = TextJob(part.text, "en", "zh-CN", 0, 1, 1, True, (), 0, 3, (part,))
+    translator = Mock()
+    translator.translate_segments.return_value = ("准备好了吗？", "好了！")
+    texts, runs = engine._translate_runs(translator, job, lambda: False)
+    assert translator.translate_segments.call_args.args[0] == ("Are you ready?", " Yes!")
+    assert texts == ("准备好了吗？ 好了！",)
+    assert runs == ((CaptionRun("准备好了吗？", 0), CaptionRun(" "), CaptionRun("好了！", 1)),)
 
 
 def test_background_diarization_revises_existing_text_without_rerunning_asr(app, monkeypatch):

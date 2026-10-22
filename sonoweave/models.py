@@ -49,7 +49,7 @@ SEPARATION_FILE = ModelFile("welcomyou/convtasnet-libri2mix-16k-onnx", "da50e0fa
 
 
 def ensure_speaker_models(progress=lambda text: None, cancelled=lambda: False):
-    for spec in (*SPEAKER_FILES, SEPARATION_FILE):
+    for spec in SPEAKER_FILES:
         ensure_file(speaker_model_location(spec.filename), spec, progress, cancelled)
 
 

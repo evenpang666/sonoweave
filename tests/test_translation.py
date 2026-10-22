@@ -88,7 +88,7 @@ def test_cancellation_does_not_cache_or_publish_partial_translation():
 def test_model_failure_is_explicit_and_never_falls_back_to_web():
     translator, llm = translator_with()
     llm.create_completion.side_effect = RuntimeError("inference failure")
-    with pytest.raises(TranslationError, match="离线翻译"):
+    with pytest.raises(TranslationError, match="翻译暂时失败"):
         translator.translate("Hello", "ja")
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict, deque
 import json
+import gc
 import logging
 import os
 import re
@@ -9,6 +10,8 @@ import time
 from pathlib import Path
 
 from .config import translation_model_location
+from .recognition import configure_cuda
+from .resources import MODEL_LOAD_LOCK, best_gpu, is_memory_error, translation_layers
 from .streaming import bounded_context
 from .token_budget import SplitRequired, TokenBudget, TokenBudgetError
 
@@ -191,26 +194,56 @@ class Translator:
         path = Path(model_path) if model_path is not None else translation_model_location()
         self.family = "hunyuan" if "hy-mt" in path.name.lower() else "qwen"
         if not path.is_file():
-            raise TranslationError("缺少离线翻译模型，请重新启动以下载，或运行 tools/prepare_models.py")
+            raise TranslationError("缺少翻译模型，请重新启动以下载，或运行 tools/prepare_models.py")
+        self.model_path = path
+        self.context_size = context_size
+        self.gpu_layers = 0
+        self._load_model()
+
+    def _load_model(self, cpu_only=False):
+        configure_cuda()
         try:
-            from llama_cpp import Llama, llama_supports_gpu_offload
-            use_gpu = os.environ.get("SONOWEAVE_TRANSLATE_DEVICE", "auto") != "cpu" and llama_supports_gpu_offload()
-            options = dict(model_path=str(path), n_ctx=context_size, n_batch=512, n_ubatch=256,
+            import llama_cpp
+            requested = os.environ.get("SONOWEAVE_TRANSLATE_DEVICE", "auto")
+            cuda = any((Path(llama_cpp.__file__).parent / "lib").glob("*ggml-cuda*"))
+            use_gpu = not cpu_only and requested != "cpu" and llama_cpp.llama_supports_gpu_offload()
+            if use_gpu and cuda:
+                import ctranslate2
+                use_gpu = ctranslate2.get_cuda_device_count() > 0
+            if requested == "cuda" and not cuda:
+                use_gpu = False
+            options = dict(model_path=str(self.model_path), n_ctx=self.context_size, n_batch=512, n_ubatch=128,
                            n_threads=min(6, max(2, (os.cpu_count() or 4) // 2)),
                            n_threads_batch=min(8, os.cpu_count() or 4), verbose=False, seed=0)
-            try:
-                self.llm = Llama(**options, n_gpu_layers=-1 if use_gpu else 0)
-                self.device = "GPU" if use_gpu else "CPU"
-            except Exception:
-                if not use_gpu:
-                    raise
-                log.warning("GPU translation initialization failed; falling back to CPU")
-                self.llm = Llama(**options, n_gpu_layers=0)
-                self.device = "CPU"
-            log.info("Offline translation ready: %s, %s", path.name, self.device)
-            self.token_budget = TokenBudget(self.llm)
+            with MODEL_LOAD_LOCK:
+                if self.llm is not None:
+                    self.llm.close()
+                    self.llm = None
+                    self.token_budget = None
+                    gc.collect()
+                gpu = best_gpu() if use_gpu and cuda else None
+                candidates = translation_layers(self.model_path, self.context_size, gpu) if use_gpu else (0,)
+                for layers in candidates:
+                    try:
+                        placement = dict(n_gpu_layers=layers, offload_kqv=bool(layers), op_offload=bool(layers))
+                        if layers and cuda:
+                            placement.update(main_gpu=gpu.index if gpu else 0,
+                                             split_mode=llama_cpp.LLAMA_SPLIT_MODE_NONE, flash_attn=True)
+                        self.llm = llama_cpp.Llama(**options, **placement)
+                        self.gpu_layers = layers
+                        backend = "CUDA" if cuda else "GPU"
+                        self.device = (backend if layers == -1 else backend + "+CPU") if layers else "CPU"
+                        break
+                    except Exception:
+                        if not layers:
+                            raise
+                        gc.collect()
+                        log.warning("GPU translation allocation failed; retrying with fewer GPU layers")
+                self.token_budget = TokenBudget(self.llm)
+            log.info("Offline translation ready: %s, %s, GPU layers=%s",
+                     self.model_path.name, self.device, self.gpu_layers)
         except Exception as exc:
-            raise TranslationError("离线翻译模型加载失败，请右键重试或检查模型文件") from exc
+            raise TranslationError("翻译模型加载失败，请右键重试或检查模型文件") from exc
 
     def warmup(self):
         self.warming = True
@@ -347,7 +380,7 @@ class Translator:
         chunks = []
         truncated = False
         stream = None
-        budget = 60 if self.warming else (20 if self.device == "CPU" else 5)
+        budget = 60 if self.warming else (20 if "CPU" in self.device else 5)
         deadline = time.monotonic() + budget
 
         def timed_out():
@@ -384,7 +417,14 @@ class Translator:
         except (TranslationCancelled, TranslationTimeout, UntranslatedOutput):
             raise
         except Exception as exc:
-            raise TranslationError("离线翻译暂时失败，正在继续聆听…") from exc
+            if self.device != "CPU" and is_memory_error(exc) and hasattr(self, "model_path"):
+                if stream is not None and callable(getattr(stream, "close", None)):
+                    stream.close()
+                    stream = None
+                log.warning("GPU translation ran out of memory; retrying the same text on CPU")
+                self._load_model(cpu_only=True)
+                return self._generate(tokens, output_tokens, should_cancel)
+            raise TranslationError("翻译暂时失败，正在继续聆听…") from exc
         finally:
             if stream is not None and callable(getattr(stream, "close", None)):
                 stream.close()

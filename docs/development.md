@@ -38,12 +38,14 @@
 | `SONOWEAVE_MODELS_DIR` | 下载及读取模型的目录；便于提前配置离线模型 |
 | `SONOWEAVE_MODEL` | 本地 CTranslate2 Whisper 模型目录 |
 | `SONOWEAVE_TRANSLATE_MODEL` | 诊断脚本的本地 GGUF 覆盖路径；桌面菜单按所选 4B/2B 读取 |
-| `SONOWEAVE_ASR_DEVICE` | `auto`（默认）或 `cpu` |
-| `SONOWEAVE_TRANSLATE_DEVICE` | `auto`（默认）或 `cpu` |
+| `SONOWEAVE_ASR_DEVICE` | `auto`（默认）、`cuda` 或 `cpu`；CUDA 不可用或显存不足时回退 CPU |
+| `SONOWEAVE_TRANSLATE_DEVICE` | `auto`（默认）、`cuda` 或 `cpu`；`cuda` 需要 CUDA 轮子；显存不足时混合分层或回退 CPU |
 
 自动下载及准备脚本可使用 `HF_ENDPOINT` 和 `HTTPS_PROXY`；它们仅用于获取模型文件。技术参考：[SoundCard](https://soundcard.readthedocs.io/en/latest/)、[faster-whisper](https://github.com/SYSTRAN/faster-whisper)、[llama-cpp-python](https://github.com/abetlen/llama-cpp-python)。
 
-人声配色默认关闭，默认组合不包含额外的人声模型。需要提前准备时给 `PrepareModels.bat` / `PrepareModels.sh` 添加 `--speaker-colors`；也可在右键菜单首次开启时自动下载。右键还可设置字号（12–48 pt，默认 23）和显示行数（1–10，默认 4），均即时生效并持久化。
+人声配色默认关闭，默认组合不包含额外的人声模型。需要提前准备时给 `PrepareModels.bat` / `PrepareModels.sh` 添加 `--speaker-colors`；也可在右键菜单首次开启时自动下载。右键还可设置字号（12–48 pt，默认 16）和显示行数（1–10，默认 2），均即时生效并持久化。历史句子的文字和颜色固定，只允许当前句修订；字幕固定左上角，句号、问号和感叹号触发换行，省略号和原始换行不触发。每句仅一种人声颜色，无法确认时使用默认色。超长句保持单行向右增长，可横向滚动查看全文。
+
+窗口支持四边与四角拉伸，原生缩放不可用时使用几何位移回退；手动尺寸优先于内容自动高度。`tests/test_window.py` 验证八个方向及新字幕和字号更新后保留尺寸，`tests/test_session.py` 验证退出清理仅删除本次临时文件，`tests/test_engine.py` 验证清空后拒绝迟到结果。退出不删除模型、设置、下载断点或开发测试报告。
 
 ## 仓库与产物
 
@@ -54,6 +56,18 @@
 - `.gitignore` 不会自动取消已有跟踪；排除已跟踪产物需使用 `git rm --cached`，保留本地文件。历史提交不会因此被改写。
 
 测试脚本的成功输出不代表翻译语义全部正确。当前仍有历史事件序数、专名和习语错译，也可能出现较长的无新字幕间隔；识别未提供新原文的停顿不计入“原文增长但译文停滞”指标。未保存并标注参照音频时，不推断总体准确率或把无新字幕一概当作软件排队延迟。
+
+翻译与显示实测可运行：
+
+```powershell
+.venv\Scripts\python.exe tools\live_test.py --seconds 180 --label translation-live --model 4b --show
+.venv\Scripts\python.exe tools\replay_caption_updates.py .cache\translation-live-test\report.json
+.venv\Scripts\python.exe tools\check_translation_quality.py --label translation-quality
+```
+
+实播使用真实默认输出设备，人声配色关闭，阻断 Python socket 连接，不保存音频；逐次字幕、原文采样、译文缓存和截图仅写入忽略的 `.cache`。不加 `--show` 时使用离屏窗口。报告区分音频窗口末端到发布的延迟、每段首次字幕相对语音起点的延迟、最后音频窗口到最终校准的延迟，以及实际显示区变化间隔。未出现最终发布的段落不纳入最终校准延迟样本。
+
+`caption_metrics` 将同一音频段内的纯追加与替换区分：当前句原有长度至少 8 字符、替换至少一半时计为大幅改写；不把正常新增段落或移除较早显示行当成改写。快照在 UI 接收信号时采样，可能合并极近的后台缓存变化。回放对比复用同一批译文，并按一秒节奏运行健康检查，只评估显示策略及最终文本一致性；不重新运行 ASR，也不声称不同实播内容可以直接比较准确率。固定语义用例同时测试 4B 和 2B，输出需人工审阅，不自动生成总体准确率。
 
 人声着色的回归测试位于 `tests/test_speakers.py` 和 `tests/test_window.py`，覆盖身份复用、未知及重叠范围、颜色延后发布、旧任务拒绝、音频重叠去重、Unicode 与四行裁剪。测试使用受控时间与声纹向量，不代表真实人声准确率。真实模型验证可使用 sherpa-onnx 官方公开的 `0-four-speakers-zh.wav`，测试音频、推理报告及截图均放在被忽略的 `.cache/speaker-test`，不纳入发布包。
 
@@ -79,8 +93,10 @@
 
 ## 人声与重叠回归
 
-`tests/test_speech_overlap.py` 覆盖局部身份互斥、跨窗上下文、重叠区域不学习声纹、分离输出幅度、双路译文标签、旧任务拒绝及普通 ASR 序号增长后的颜色发布。后台分离按需加载独立 CPU 识别器，不锁住主识别器。
+人声配色为实验功能，当前翻译准确性、延迟和字幕修订测试保持关闭。
+
+`tests/test_sentences.py`、`tests/test_window.py` 和 `tests/test_caches.py` 覆盖问号及感叹号换行、整句选色、跨音频窗口的句子不混色、历史文字与颜色固定。`tests/test_speech_overlap.py` 覆盖局部身份互斥、跨窗上下文、重叠区域不学习声纹，验证字幕线程不启动分离且检测到重叠不排入分离任务。该文件中保留的分离工具测试只用于离线实验；字幕流程不运行分离器或第二个 CPU 识别器。
 
 `SONOWEAVE_TEST_SPEAKER_MODELS=1 .venv-linux/bin/python -m pytest tests/test_speakers_models.py -q` 可运行本地真实模型检查，缺少公共语音样本或模型时跳过。`.cache/speaker-test/four-speakers.wav` 来自 sherpa-onnx 官方 `speaker-segmentation-models/0-four-speakers-zh.wav`；`.cache/speaker-test/clean-overlap.npz` 使用公开 LibriSpeech 两个不同说话人的录音，分别来自 `hf-internal-testing/librispeech_asr_dummy` 的 clean/validation 首条和 `openslr/librispeech_asr` 的 clean/test 首条，补齐长度并按相同 RMS 混合，键为 `a`、`b`、`mix`。检查推理期间禁止 Python 网络连接，不播放声音。
 
-真实模型检查验证四个人声的复用，以及叠加语音中两句已知文本的关键词是否分别保留。该小样本不代表总体准确率；中文重叠样本仍可出现明显识别错误，不将“两路输出颜色不同”当作分离或翻译准确的证据。音频、报告和截图均只保留在忽略的 `.cache` 中。
+真实模型检查验证四个人声轮流说话时的身份复用。保留的叠加语音实验仅在本地已有分离模型时运行，不属于字幕功能。该小样本不代表总体准确率；音频、报告和截图均只保留在忽略的 `.cache` 中。

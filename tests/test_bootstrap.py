@@ -12,7 +12,7 @@ from tools.bootstrap import Bootstrap, setup_lock
 def setup(tmp_path):
     root = tmp_path / "project with spaces"
     (root / "tools").mkdir(parents=True)
-    for name in ("requirements-base.txt", "requirements.txt", "requirements-cpu.txt", "tools/bootstrap.py"):
+    for name in ("requirements-base.txt", "requirements.txt", "requirements-cpu.txt", "requirements-cuda.txt", "tools/bootstrap.py"):
         (root / name).write_text(name, encoding="utf-8")
     return Bootstrap(root, uv=tmp_path / "uv with spaces.exe", platform="win32")
 
@@ -155,3 +155,24 @@ def test_upgrade_preserves_legacy_linux_cpu_choice(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="selection checked"):
         setup.install("auto")
     assert selections == ["cpu"]
+
+
+def test_auto_selects_cuda_with_nvidia_and_keeps_explicit_backend(setup, monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="617.14\n"))
+    assert setup.select_backend("auto") == "cuda"
+    assert setup.select_backend("cpu") == "cpu"
+    assert setup.select_backend("vulkan") == "vulkan"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="535.0\n"))
+    assert setup.select_backend("auto") == "vulkan"
+
+
+def test_cuda_install_uses_cuda_wheel_index_and_records_selection(setup, monkeypatch):
+    commands = []
+    monkeypatch.setattr(setup, "command", lambda *args: commands.append(args))
+    monkeypatch.setattr(setup, "ensure_system_dependencies", lambda backend: None)
+    monkeypatch.setattr(setup, "prepare_environment", lambda: setup.python.parent.mkdir(parents=True))
+    monkeypatch.setattr(setup, "probe", lambda: len(commands) == 2)
+    setup.install("cuda")
+    assert "https://abetlen.github.io/llama-cpp-python/whl/cu124" in commands[1]
+    assert setup.state()["backend"] == "cuda"
+    assert setup.state()["preference"] == "cuda"

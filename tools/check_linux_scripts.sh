@@ -8,6 +8,7 @@ project="$work/project with spaces"
 mkdir -p "$project/tools" "$work/bin" "$work/elsewhere"
 cp -- "$root/Install.sh" "$root/Start.sh" "$root/PrepareModels.sh" "$root/Build.sh" "$project/"
 cp -- "$root/tools/bootstrap.py" "$project/tools/"
+touch "$project/main.py"
 export TEST_CALLS="$work/calls" TEST_PYTHON="$work/managed python" TEST_UV_SOURCE="$work/uv-source"
 export TEST_INSTALLER="$work/uv-installer"
 export PATH="$work/bin:$PATH"
@@ -85,6 +86,16 @@ cat > "$project/dist/SonoWeave/SonoWeave" <<'SH'
 printf 'bundle<%s>\n' "$*" >> "$TEST_CALLS"
 SH
 chmod +x "$project/dist/SonoWeave/SonoWeave"
+: > "$TEST_CALLS"
+bash "$project/Start.sh" --preview
+grep -Fxq '<main.py><--preview>' "$TEST_CALLS"
+if grep -Fq 'bundle<' "$TEST_CALLS"; then echo "Old bundle shadowed source" >&2; exit 1; fi
+mv -- "$project/main.py" "$project/main.py.saved"
+: > "$TEST_CALLS"
 bash "$project/Start.sh" --preview
 grep -Fxq 'bundle<--preview>' "$TEST_CALLS"
+bash "$project/Install.sh" --cuda
+[[ $(cat "$project/.venv-linux/.sonoweave-ready.json") == cuda ]]
+bash "$project/Install.sh" --vulkan
+[[ $(cat "$project/.venv-linux/.sonoweave-ready.json") == vulkan ]]
 echo "Automatic uv / Python / dependency launch flow OK (stubbed environment)"

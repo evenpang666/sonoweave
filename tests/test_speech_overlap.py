@@ -132,8 +132,13 @@ def test_partial_separation_keeps_existing_caption_instead_of_dropping_a_voice(a
                                        model, tracker, "en") is None
 
 
-def test_detected_overlap_schedules_raw_audio_for_background_separation(app, monkeypatch):
+def test_detected_overlap_keeps_default_color_without_separation(app, monkeypatch):
     engine = CaptionEngine("zh-CN", speaker_colors=True)
+    part = SourceChunk(1, "Both voices.", "en", 1, True, 0, 3,
+                       (CaptionRun("Both voices.", 0),), (TimedWord("Both voices.", 0, 3),))
+    engine.source_cache.update(part)
+    schedule = Mock(side_effect=AssertionError("overlap separation must stay disabled"))
+    monkeypatch.setattr(engine, "_schedule_overlap", schedule)
     monkeypatch.setattr("sonoweave.engine.SpeakerTracker", lambda **kwargs: SimpleNamespace(
         analyze_window=lambda window: {window.utterance_id: (window.sequence, (SpeakerTurn(0, 3, None, True),))}))
     now = time.monotonic()
@@ -142,11 +147,26 @@ def test_detected_overlap_schedules_raw_audio_for_background_separation(app, mon
     worker = threading.Thread(target=engine._diarize)
     worker.start()
     try:
-        queued, generation = engine.overlap_queue.get(timeout=2)
-        assert queued is window and generation == 0
+        job = engine.text_queue.get(timeout=2)
+        assert job.segments[0].runs == (CaptionRun("Both voices."),)
+        assert not engine.overlap_queue.items
+        assert not engine.speaker_audio
+        schedule.assert_not_called()
     finally:
         engine.stop()
         worker.join(3)
+
+
+def test_caption_pipeline_only_starts_sequential_voice_analysis(app, monkeypatch):
+    engine = CaptionEngine("zh-CN", speaker_colors=True)
+    threads = []
+    def thread(**kwargs):
+        threads.append(kwargs)
+        return SimpleNamespace(start=lambda: None)
+    monkeypatch.setattr("sonoweave.engine.threading.Thread", thread)
+    engine.start()
+    assert [item["name"] for item in threads] == ["system-audio", "recognition", "speakers", "translation"]
+    assert all(item["target"] != engine._separate for item in threads)
 
 
 def test_overlap_worker_is_lazy_and_emits_two_voice_repair(app, monkeypatch):

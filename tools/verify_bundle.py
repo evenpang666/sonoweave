@@ -1,6 +1,7 @@
 """Check the packaged UI, local model loading, and loopback initialization."""
 from pathlib import Path
 import os
+import json
 import subprocess
 import sys
 import time
@@ -14,7 +15,19 @@ exe = root / "dist" / "SonoWeave" / ("SonoWeave.exe" if sys.platform == "win32" 
 image = folder / "preview.png"
 subprocess.run([str(exe), "--screenshot", str(image)], env=env, check=True, timeout=30)
 assert image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+assert not (folder / "cache").exists(), "Session temporary cache remains after normal exit"
 print("BUNDLED UI OK", flush=True)
+print("BUNDLED SESSION CLEANUP OK", flush=True)
+if "--require-cuda" in sys.argv:
+    report_path = folder / "devices.json"
+    subprocess.run([str(exe), "--check-devices", str(report_path)], env=env, check=True, timeout=120)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["asr_device"] == "cuda", report
+    assert report["translation_device"] == "CUDA", report
+    if sys.platform == "win32":
+        for library in ("cublas64_12.dll", "cublasLt64_12.dll", "cudnn64_9.dll", "ggml-cuda.dll"):
+            assert Path(report["cuda_libraries"][library]).is_relative_to(exe.parent), report
+    print("BUNDLED WHISPER + QWEN CUDA OK", flush=True)
 if "--preview-only" in sys.argv:
     raise SystemExit(0)
 process = subprocess.Popen([str(exe)], env=env)

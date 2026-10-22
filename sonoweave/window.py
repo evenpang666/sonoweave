@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QPointF, Qt, QTimer, Signal
-from PySide6.QtGui import QActionGroup, QColor, QFont, QPainter, QPen, QTextCharFormat, QTextLayout, QTextOption
-from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QMenu, QSizeGrip, QVBoxLayout, QWidget
+import re
 
-from .config import LANGUAGES, TRANSLATION_MODELS, Settings
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, Signal
+from PySide6.QtGui import QActionGroup, QColor, QFont, QPainter, QPen, QTextCharFormat, QTextLayout, QTextOption
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QMenu, QScrollArea, QSizeGrip, QSizePolicy, QVBoxLayout, QWidget
+
+from .config import DEFAULT_CAPTION_LINES, DEFAULT_FONT_SIZE, LANGUAGES, TRANSLATION_MODELS, Settings
 from .streaming import CaptionRun, slice_runs
+from .sentences import sentence_caption
 
 
 SPEAKER_COLORS = ("#F3F5FA", "#8FD3FF", "#FFD58A", "#B9E89A", "#D9B5FF", "#FFADBC", "#8EE3D8", "#E8DF9C")
@@ -26,6 +29,14 @@ class CaptionLabel(QLabel):
         self.runs = tuple(runs)
         self.update()
 
+    def fit_content(self):
+        metrics = self.fontMetrics()
+        lines = self.text().split("\n")
+        width = max((metrics.horizontalAdvance(line) for line in lines), default=0) + 2
+        height = metrics.lineSpacing() * len(lines) + 2
+        self.setMinimumSize(width, height)
+        return height
+
     def paintEvent(self, event):
         if not self.runs or "".join(run.text for run in self.runs) != self.text():
             return super().paintEvent(event)
@@ -35,8 +46,8 @@ class CaptionLabel(QLabel):
         for paragraph in self.text().split("\n"):
             layout = QTextLayout(paragraph, self.font())
             option = QTextOption()
-            option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
-            option.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            option.setWrapMode(QTextOption.WrapMode.NoWrap)
+            option.setAlignment(Qt.AlignmentFlag.AlignLeft)
             layout.setTextOption(option)
             formats, position = [], 0
             for run in slice_runs(self.runs, offset, offset + len(paragraph)):
@@ -61,53 +72,26 @@ class CaptionLabel(QLabel):
                 height += self.fontMetrics().height()
             layouts.append(layout)
             offset += len(paragraph) + 1
-        origin = QPointF(self.contentsRect().x(), self.contentsRect().y() + max(0, (self.contentsRect().height() - height) / 2))
+        origin = QPointF(self.contentsRect().x(), self.contentsRect().y())
         for layout in layouts:
             layout.draw(painter, origin)
         painter.end()
 
 
-def caption_tail(text, font, width, max_lines=4):
+def caption_tail(text, font, width, max_lines=DEFAULT_CAPTION_LINES):
+    text, _ = sentence_caption(text)
     start = caption_tail_start(text, font, width, max_lines)
-    return "…" + text[start:] if start else text
+    return text[start:]
 
 
-def caption_tail_start(text, font, width, max_lines=4):
-    """Display a few most recent visual lines while keeping the text cache intact."""
-    positions = caption_line_starts(text, font, width)
-    if len(positions) <= max_lines:
-        return 0
-    start = positions[-max_lines]
-    start += len(text[start:]) - len(text[start:].lstrip())
-    # The added ellipsis also takes space and must not create an extra line.
-    while start < len(text) and len(caption_line_starts("…" + text[start:], font, width)) > max_lines:
-        start += 1
-        start += len(text[start:]) - len(text[start:].lstrip())
-    return start
+def caption_tail_start(text, font, width, max_lines=DEFAULT_CAPTION_LINES):
+    """Rows end only at full stops, independent of sentence length and width."""
+    positions = [0, *(match.end() for match in re.finditer(r"\n+", text) if match.end() < len(text))]
+    return positions[-max(1, max_lines)] if len(positions) > max_lines else 0
 
 
 def caption_line_starts(text, font, width):
-    positions = []
-    offset = 0
-    for paragraph in text.split("\n"):
-        if not paragraph:
-            positions.append(offset)
-        layout = QTextLayout(paragraph, font)
-        option = QTextOption()
-        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
-        layout.setTextOption(option)
-        layout.beginLayout()
-        while True:
-            line = layout.createLine()
-            if not line.isValid():
-                break
-            line.setLineWidth(max(50, width))
-            # Qt indexes UTF-16 code units; Python indexes Unicode code points.
-            prefix = paragraph.encode("utf-16-le")[:line.textStart() * 2].decode("utf-16-le", errors="ignore")
-            positions.append(offset + len(prefix))
-        layout.endLayout()
-        offset += len(paragraph) + 1
-    return positions
+    return [0, *(match.end() for match in re.finditer("\n", text))]
 
 
 class CaptionWindow(QWidget):
@@ -123,13 +107,16 @@ class CaptionWindow(QWidget):
         self._caption_text = ""
         self._caption_runs = ()
         self._drag: QPoint | None = None
+        self._user_resized = False
+        self._resize_edges = Qt.Edge(0)
+        self._resize_start = None
+        self._resize_geometry = None
         self._base_status = ("正在准备语音模型…", False)
         self._translation_error = ""
-        self.setWindowTitle("声屿 SonoWeave · 离线实时翻译字幕")
+        self.setWindowTitle("声屿 SonoWeave · 实时翻译字幕")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMinimumWidth(440)
-        self.setMaximumWidth(1500)
         self.setMinimumHeight(148)
         self.resize(860, 174)
         self.setMouseTracking(True)
@@ -167,20 +154,34 @@ class CaptionWindow(QWidget):
         font = QFont("Microsoft YaHei UI", settings.font_size, QFont.Weight.Medium)
         font.setFamilies(["Microsoft YaHei UI", "Noto Sans CJK SC", "Noto Sans", "DejaVu Sans"])
         self.caption_label.setFont(font)
-        self.caption_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.caption_label.setWordWrap(True)
+        self.caption_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.caption_label.setMargin(0)
+        self.caption_label.setIndent(0)
+        self.caption_label.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.MinimumExpanding)
+        self.caption_label.setWordWrap(False)
         self.caption_label.setTextFormat(Qt.TextFormat.PlainText)
-        layout.addWidget(self.caption_label, 1)
+        self.caption_scroll = QScrollArea()
+        self.caption_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.caption_scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        self.caption_scroll.setWidgetResizable(True)
+        self.caption_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.caption_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.caption_scroll.setWidget(self.caption_label)
+        layout.addWidget(self.caption_scroll, 1)
         footer = QHBoxLayout()
         footer.addStretch()
-        self.hint = QLabel("拖动移动  ·  右键切换语言", objectName="hint")
+        self.hint = QLabel("拖动移动  ·  右键设置", objectName="hint")
         footer.addWidget(self.hint)
         footer.addStretch()
         layout.addLayout(footer)
         self.grip = QSizeGrip(self)
+        self.grip.setToolTip("拖动边缘或四角调整大小")
         # Let mouse events on labels reach this widget, preserving drag/context menu.
         for label in self.findChildren(QLabel):
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        for widget in (self, *self.findChildren(QWidget)):
+            widget.setMouseTracking(True)
+            widget.installEventFilter(self)
         screen = QApplication.primaryScreen()
         if screen:
             rect = screen.availableGeometry()
@@ -192,28 +193,32 @@ class CaptionWindow(QWidget):
         self._caption_text = text
         self._caption_runs = tuple(runs) if "".join(run.text for run in runs) == text else ()
         self._render_caption()
-        self.hint.setText("离线 · 尾部已校准  ·  右键切换语言" if final else "离线 · 持续缓存与校准  ·  右键切换语言")
+        self.hint.setText("尾部已校准  ·  右键设置" if final else "持续缓存与校准  ·  右键设置")
         self.adjust_height()
 
     def _render_caption(self):
-        room = max(1, int((self.screen().availableGeometry().height() - 128) /
-                          max(1, self.caption_label.fontMetrics().lineSpacing())))
-        start = caption_tail_start(self._caption_text, self.caption_label.font(),
-                                   max(100, self.surface.width() - 52), min(self.settings.caption_lines, room))
-        text = ("…" if start else "") + self._caption_text[start:]
+        display_text, display_runs = sentence_caption(self._caption_text, self._caption_runs)
+        start = caption_tail_start(display_text, self.caption_label.font(),
+                                   max(100, self.caption_scroll.viewport().width()), self.settings.caption_lines)
+        text = display_text[start:]
         if text != self.caption_label.text():
             self.caption_label.setText(text)
-        runs = slice_runs(self._caption_runs, start) if self.settings.speaker_colors else ()
-        self.caption_label.set_runs(((CaptionRun("…"),) if start and runs else ()) + runs)
+        self.caption_label.fit_content()
+        runs = slice_runs(display_runs, start) if self.settings.speaker_colors else ()
+        self.caption_label.set_runs(runs)
 
     def adjust_height(self) -> None:
-        available = max(100, self.surface.width() - 52)
-        height = self.caption_label.heightForWidth(available)
+        height = self.caption_label.fit_content()
+        if self._user_resized:
+            return  # Manual dimensions remain fixed; overflow uses the scroll area.
+        if self.caption_label.minimumWidth() > self.caption_scroll.viewport().width():
+            height += self.caption_scroll.horizontalScrollBar().sizeHint().height()
         screen = self.screen().availableGeometry()
         required = min(max(174, height + 104), screen.height() - 24)
-        bottom = self.geometry().bottom()
         self.resize(self.width(), required)
-        self.move(self.x(), max(screen.top(), bottom - required + 1))
+        # Grow down from a fixed text origin; move only to stay on screen.
+        if self.geometry().bottom() > screen.bottom():
+            self.move(self.x(), max(screen.top(), screen.bottom() - required + 1))
 
     def set_status(self, text: str, error: bool = False) -> None:
         self._base_status = (text, error)
@@ -319,14 +324,14 @@ class CaptionWindow(QWidget):
             model_group.addAction(action)
             action.triggered.connect(lambda checked=False, model=key: self.choose_model(model))
         menu.addSeparator()
-        speakers = menu.addAction("人声配色")
+        speakers = menu.addAction("人声配色（实验）")
         speakers.setCheckable(True)
         speakers.setChecked(self.settings.speaker_colors)
         speakers.triggered.connect(self.choose_speaker_colors)
         sizes = menu.addMenu("字体大小")
         size_group = QActionGroup(menu)
         for size in sorted({12, 16, 20, 23, 28, 32, 40, 48, self.settings.font_size}):
-            action = sizes.addAction(f"{size} pt" + ("（默认）" if size == 23 else ""))
+            action = sizes.addAction(f"{size} pt" + ("（默认）" if size == DEFAULT_FONT_SIZE else ""))
             action.setCheckable(True)
             action.setChecked(size == self.settings.font_size)
             size_group.addAction(action)
@@ -336,7 +341,7 @@ class CaptionWindow(QWidget):
         lines = menu.addMenu("显示行数")
         line_group = QActionGroup(menu)
         for count in range(1, 11):
-            action = lines.addAction(f"{count} 行" + ("（默认）" if count == 4 else ""))
+            action = lines.addAction(f"{count} 行" + ("（默认）" if count == DEFAULT_CAPTION_LINES else ""))
             action.setCheckable(True)
             action.setChecked(count == self.settings.caption_lines)
             line_group.addAction(action)
@@ -349,6 +354,79 @@ class CaptionWindow(QWidget):
 
     def contextMenuEvent(self, event) -> None:
         self.context_menu().exec(event.globalPos())
+
+    def _edges_at(self, position):
+        edges = Qt.Edge(0)
+        if position.x() < 12:
+            edges |= Qt.Edge.LeftEdge
+        elif position.x() >= self.width() - 12:
+            edges |= Qt.Edge.RightEdge
+        if position.y() < 12:
+            edges |= Qt.Edge.TopEdge
+        elif position.y() >= self.height() - 12:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    @staticmethod
+    def _edge_cursor(edges):
+        horizontal = bool(edges & (Qt.Edge.LeftEdge | Qt.Edge.RightEdge))
+        vertical = bool(edges & (Qt.Edge.TopEdge | Qt.Edge.BottomEdge))
+        if horizontal and vertical:
+            return (Qt.CursorShape.SizeFDiagCursor if edges in (
+                Qt.Edge.LeftEdge | Qt.Edge.TopEdge, Qt.Edge.RightEdge | Qt.Edge.BottomEdge)
+                else Qt.CursorShape.SizeBDiagCursor)
+        return Qt.CursorShape.SizeHorCursor if horizontal else Qt.CursorShape.SizeVerCursor
+
+    def eventFilter(self, watched, event):
+        kind = event.type()
+        if kind not in (QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+            return super().eventFilter(watched, event)
+        position = self.mapFromGlobal(event.globalPosition().toPoint())
+        edges = self._edges_at(position)
+        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            if watched is self.grip:
+                self._user_resized = True
+            if edges:
+                self._user_resized = True
+                self._drag = None
+                handle = self.windowHandle()
+                if not handle or not handle.startSystemResize(edges):
+                    self._resize_edges = edges
+                    self._resize_start = event.globalPosition().toPoint()
+                    self._resize_geometry = self.geometry()
+                    self.grabMouse()
+                event.accept()
+                return True
+        elif kind == QEvent.Type.MouseMove:
+            if self._resize_edges:
+                self._resize_to(event.globalPosition().toPoint())
+                return True
+            if not event.buttons():
+                if edges:
+                    self.setCursor(self._edge_cursor(edges))
+                else:
+                    self.unsetCursor()
+        elif kind == QEvent.Type.MouseButtonRelease and self._resize_edges:
+            self._resize_to(event.globalPosition().toPoint())
+            self._resize_edges = Qt.Edge(0)
+            self._resize_start = self._resize_geometry = None
+            self.releaseMouse()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _resize_to(self, position):
+        delta = position - self._resize_start
+        rect = self._resize_geometry.adjusted(0, 0, 0, 0)
+        edges = self._resize_edges
+        if edges & Qt.Edge.LeftEdge:
+            rect.setLeft(min(rect.left() + delta.x(), rect.right() - self.minimumWidth() + 1))
+        elif edges & Qt.Edge.RightEdge:
+            rect.setRight(max(rect.right() + delta.x(), rect.left() + self.minimumWidth() - 1))
+        if edges & Qt.Edge.TopEdge:
+            rect.setTop(min(rect.top() + delta.y(), rect.bottom() - self.minimumHeight() + 1))
+        elif edges & Qt.Edge.BottomEdge:
+            rect.setBottom(max(rect.bottom() + delta.y(), rect.top() + self.minimumHeight() - 1))
+        self.setGeometry(rect)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -369,14 +447,6 @@ class CaptionWindow(QWidget):
         self.grip.move(self.width() - 26, self.height() - 26)
         if self.has_caption:
             self._render_caption()
-            QTimer.singleShot(0, self._fit_after_resize)
-
-    def _fit_after_resize(self) -> None:
-        # Only increase height during manual width changes; avoid recursive resize events.
-        required = self.caption_label.heightForWidth(max(100, self.surface.width() - 52)) + 104
-        limit = self.screen().availableGeometry().height() - 24
-        if self.height() < min(required, limit):
-            self.resize(self.width(), min(required, limit))
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -386,5 +456,13 @@ class CaptionWindow(QWidget):
         painter.drawRoundedRect(self.rect().adjusted(9, 10, -9, -7), 21, 21)
 
     def closeEvent(self, event) -> None:
+        self.clear_session()
         QApplication.instance().quit()
         event.accept()
+
+    def clear_session(self):
+        self.has_caption = False
+        self._caption_text = ""
+        self._caption_runs = ()
+        self.caption_label.clear()
+        self.caption_label.set_runs(())

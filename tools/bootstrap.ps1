@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('auto', 'cpu', 'vulkan')][string]$Backend = 'vulkan',
+    [ValidateSet('auto', 'cpu', 'vulkan', 'cuda')][string]$Backend = 'auto',
     [switch]$Ensure
 )
 $ErrorActionPreference = 'Stop'

@@ -22,7 +22,7 @@ def offline(monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError("Inference attempted a network connection")
     monkeypatch.setattr(socket.socket, "connect", fail)
-    if any(not speaker_model_location(spec.filename).is_file() for spec in (*SPEAKER_FILES, SEPARATION_FILE)):
+    if any(not speaker_model_location(spec.filename).is_file() for spec in SPEAKER_FILES):
         pytest.skip("local speaker models are missing")
 
 
@@ -56,6 +56,8 @@ def test_four_real_voices_keep_identity_when_they_return(monkeypatch):
 
 def test_known_english_overlap_recovers_both_sentences_with_different_labels(app, monkeypatch):
     offline(monkeypatch)
+    if not speaker_model_location(SEPARATION_FILE.filename).is_file():
+        pytest.skip("experimental separation model is not prepared by the app")
     path = Path(".cache/speaker-test/clean-overlap.npz")
     if not path.is_file():
         pytest.skip("public LibriSpeech two-speaker mixture is missing")

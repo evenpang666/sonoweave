@@ -139,7 +139,7 @@ def capture_loopback(stop: threading.Event, on_audio: Callable, on_status: Calla
                     raise RuntimeError("No default output device")
                 microphone = _loopback_microphone(sc, speaker)
                 with microphone.recorder(samplerate=SAMPLE_RATE, blocksize=2048) as recorder:
-                    on_status("正在聆听系统声音 · 离线", False)
+                    on_status("正在聆听系统声音", False)
                     next_check = time.monotonic() + 2
                     while not stop.is_set():
                         window = segmenter.feed(recorder.record(numframes=FRAME_SAMPLES))

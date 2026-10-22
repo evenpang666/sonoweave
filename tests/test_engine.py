@@ -5,6 +5,7 @@ from unittest.mock import Mock
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from PySide6.QtCore import Qt
 
 from sonoweave.engine import CaptionEngine
@@ -27,6 +28,33 @@ def test_backpressure_coalesces_same_utterance_and_discards_oldest():
     queue.put(3, "three")
     queue.put(4, "four")
     assert [queue.get(), queue.get()] == ["three", "four"]
+
+
+def test_exit_clears_session_text_audio_voices_and_rejects_late_results(app):
+    engine = CaptionEngine("zh-CN", speaker_colors=True)
+    part = SourceChunk(1, "Private source", "en", 1, True, 0, 1)
+    engine.source_cache.update(part)
+    engine.translation_cache.update((part,), ("Private translation",), {1})
+    engine.speaker_registry.identify([1, 0], 2)
+    window = AudioWindow(1, 1, np.ones(16000), True, 0, 1)
+    engine._enqueue_audio(window)
+    engine.overlap_queue.put(1, (window, 0))
+    with engine.lock:
+        engine._queue_transcript()
+    engine.last_published = ("Private translation",)
+    engine.speaker_windows[1] = (1, ())
+    engine.clear_session()
+    assert engine.stop_event.is_set()
+    assert not engine.source_cache.snapshot()
+    assert not engine.translation_cache.snapshot()
+    assert not engine.speaker_registry.prototypes
+    assert not engine.speaker_windows
+    assert engine.last_job is engine.last_published is None
+    engine._enqueue_audio(window)
+    engine._publish(job(), (part,), ("Late translation",), True)
+    for queue in (engine.audio_queue, engine.speaker_queue, engine.overlap_queue, engine.text_queue):
+        assert not queue.items
+    assert not engine.translation_cache.snapshot()
 
 
 def test_language_switch_retranslates_current_phrase_with_context(app):
@@ -204,7 +232,35 @@ def test_component_error_is_not_hidden_by_other_models_becoming_ready(app):
     engine._component_status("audio")
     assert statuses[-1] == ("模型缺失", True)
     engine._component_status("translation")
-    assert statuses[-1] == ("正在聆听系统声音 · 离线", False)
+    assert statuses[-1] == ("正在聆听系统声音", False)
+
+
+def test_translation_waits_for_whisper_allocation_and_can_cancel_startup(app, monkeypatch):
+    engine = CaptionEngine("zh-CN")
+    engine.coordinate_startup = True
+    loaded = threading.Event()
+
+    def translate_once(*args):
+        loaded.set()
+        engine.stop()
+
+    monkeypatch.setattr(engine, "_translate_once", translate_once)
+    worker = threading.Thread(target=engine._translate)
+    worker.start()
+    assert not loaded.wait(0.15)
+    engine.recognition_loaded.set()
+    assert loaded.wait(2)
+    worker.join(2)
+    assert not worker.is_alive()
+
+    engine = CaptionEngine("zh-CN")
+    engine.coordinate_startup = True
+    monkeypatch.setattr(engine, "_translate_once", lambda *args: pytest.fail("Cancelled startup loaded Qwen"))
+    worker = threading.Thread(target=engine._translate)
+    worker.start()
+    engine.stop()
+    worker.join(2)
+    assert not worker.is_alive()
 
 
 def test_progress_cannot_roll_an_existing_paragraph_back_to_its_first_sentence(app):
@@ -220,6 +276,101 @@ def test_progress_cannot_roll_an_existing_paragraph_back_to_its_first_sentence(a
     assert engine.translation_cache.tail() == "第一句。更长的第二句。"
     engine._publish(current, (part,), ("第一句。更长的第二句。新增第三句。",), complete=False)
     assert len(received) == 1 and not received[0].final
+
+
+def test_publishing_revisions_keeps_history_and_updates_only_current_sentence(app):
+    engine = CaptionEngine("zh-CN")
+    engine.caption_rewrite_interval = 0
+    part = SourceChunk(1, "A sentence. More speech", "en", 1, False, 0, 1)
+    engine.source_cache.update(part)
+    current = job(segments=(part,))
+    received = []
+    engine.caption.connect(received.append)
+    engine._publish(current, (part,), ("历史句子。当前句子草稿",), complete=True)
+    engine._publish(current, (part,), ("历史被重新翻译。当前句子已更新",), complete=True)
+    assert received[-1].text == "历史句子。当前句子已更新"
+    assert "".join(run.text for run in received[-1].runs) == received[-1].text
+
+
+def test_draft_rewrites_wait_but_appends_and_final_correction_are_immediate(app, monkeypatch):
+    engine = CaptionEngine("zh-CN")
+    now = [10.0]
+    monkeypatch.setattr("sonoweave.engine.time.monotonic", lambda: now[0])
+    part = SourceChunk(1, "Live speech", "en", 1, False, 0, 1)
+    engine.source_cache.update(part)
+    current = job(segments=(part,))
+    received = []
+    engine.caption.connect(received.append)
+    engine._publish(current, (part,), ("最初的句子草稿",), complete=True)
+    now[0] = 10.5
+    engine._publish(current, (part,), ("整句换成另一种说法",), complete=True)
+    assert len(received) == 1
+    assert engine.translation_cache.chunks[1] == "整句换成另一种说法"
+    now[0] = 11.3
+    engine._publish(current, (part,), ("整句换成另一种说法",), complete=True)
+    assert len(received) == 2
+    now[0] = 11.4
+    engine._publish(current, (part,), ("整句换成另一种说法并追加文字",), complete=True)
+    assert len(received) == 3
+    now[0] = 11.5
+    engine._publish(replace(current, final=True), (part,), ("最终校准立即显示。",), complete=True)
+    assert len(received) == 4 and received[-1].final
+
+
+def test_new_utterance_and_language_revision_do_not_wait_for_rewrite_interval(app, monkeypatch):
+    engine = CaptionEngine("zh-CN")
+    monkeypatch.setattr("sonoweave.engine.time.monotonic", lambda: 10)
+    first = SourceChunk(1, "First", "en", 1, False, 0, 1)
+    second = SourceChunk(2, "Second", "en", 1, False, 1, 2)
+    engine.source_cache.update(first)
+    received = []
+    engine.caption.connect(received.append)
+    engine._publish(job(), (first,), ("原来的文字",), True)
+    engine.source_cache.update(second)
+    engine._publish(job(utterance_id=2), (first, second), ("上一句最终更正", "新的一句"), True)
+    assert len(received) == 2
+    engine.set_target("ja")
+    engine._publish(job(utterance_id=2, revision=1), (second,), ("新しい文",), True)
+    assert len(received) == 3 and received[-1].revision == 1
+
+
+def test_last_held_rewrite_flushes_without_more_asr_and_reports_display_wait(app, monkeypatch):
+    engine = CaptionEngine("zh-CN")
+    now = [10.0]
+    monkeypatch.setattr("sonoweave.engine.time.monotonic", lambda: now[0])
+    part = SourceChunk(1, "Live speech", "en", 1, False, 9, 10)
+    engine.source_cache.update(part)
+    current = job(segments=(part,), started=9, ended=10)
+    received = []
+    engine.caption.connect(received.append)
+    engine._publish(current, (part,), ("原来的草稿",), complete=True)
+    now[0] = 10.5
+    engine._publish(current, (part,), ("修订后的草稿",), complete=True)
+    engine.check_health(11)
+    assert len(received) == 1
+    engine.check_health(12)
+    assert received[-1].text == "修订后的草稿"
+    assert received[-1].lag_seconds == 2
+    assert engine.pending_caption is None
+    engine.check_health(13)
+    assert len(received) == 2
+
+
+def test_held_rewrite_cannot_reappear_after_target_change_or_stop(app, monkeypatch):
+    engine = CaptionEngine("zh-CN")
+    monkeypatch.setattr("sonoweave.engine.time.monotonic", lambda: 10)
+    part = SourceChunk(1, "Live speech", "en", 1, False, 0, 1)
+    engine.source_cache.update(part)
+    received = []
+    engine.caption.connect(received.append)
+    engine._publish(job(), (part,), ("旧的草稿",), True)
+    engine._publish(job(), (part,), ("新修订的草稿",), True)
+    assert engine.pending_caption is not None
+    engine.set_target("ja")
+    engine.check_health(15)
+    assert len(received) == 1 and engine.pending_caption is None
+    engine.clear_session()
+    assert engine.pending_caption is None
 
 
 def test_identical_progress_is_not_a_fake_subtitle_refresh_but_final_state_is_delivered(app):

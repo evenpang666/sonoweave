@@ -6,6 +6,8 @@ from queue import Empty
 import re
 import threading
 
+from .sentences import sentence_ranges
+
 
 class LatestQueue:
     """Keep only the newest snapshot per utterance, with bounded backlog."""
@@ -232,13 +234,14 @@ class TranscriptCache:
 
 
 class TranslationCache:
-    """Keep aligned translations, revising a recent tail without clearing history."""
+    """Freeze published history; only the last sentence can still be revised."""
 
     def __init__(self, max_chars=8000, max_chunks=96):
         self.chunks = OrderedDict()
         self.runs = {}
         self.max_chars = max_chars
         self.max_chunks = max_chunks
+        self.latest_id = None
 
     @property
     def char_count(self):
@@ -247,6 +250,7 @@ class TranslationCache:
     def clear(self):
         self.chunks.clear()
         self.runs.clear()
+        self.latest_id = None
 
     def update(self, segments, translations, retained_ids, runs=None):
         if len(segments) != len(translations) or any(text is not None and (not isinstance(text, str) or not text.strip()) for text in translations):
@@ -255,10 +259,29 @@ class TranslationCache:
                 text is not None and "".join(run.text for run in styled) != text.strip()
                 for text, styled in zip(translations, runs))):
             raise ValueError("Styled translation/source alignment mismatch")
+        published = [segment.utterance_id for segment, text in zip(segments, translations)
+                     if text is not None and segment.utterance_id in retained_ids]
+        next_id = max(published + ([self.latest_id] if self.latest_id is not None else [])) if published else self.latest_id
         for index, (segment, text) in enumerate(zip(segments, translations)):
             if text is not None and segment.utterance_id in retained_ids:
-                self.chunks[segment.utterance_id] = text.strip()
-                self.runs[segment.utterance_id] = runs[index] if runs is not None else (CaptionRun(text.strip()),)
+                key = segment.utterance_id
+                text = text.strip()
+                styled = runs[index] if runs is not None else (CaptionRun(text),)
+                previous = self.chunks.get(key)
+                if previous is not None:
+                    if self.latest_id is not None and key < self.latest_id:
+                        continue
+                    old_parts, new_parts = sentence_ranges(previous), sentence_ranges(text)
+                    frozen = max(0, len(old_parts) - 1)
+                    if frozen:
+                        if len(new_parts) <= frozen:
+                            continue  # A shortened re-decode cannot erase history or the current draft.
+                        old_end, new_start = old_parts[frozen][0], new_parts[frozen][0]
+                        text = previous[:old_end] + text[new_start:]
+                        styled = (*slice_runs(self.runs[key], 0, old_end), *slice_runs(styled, new_start))
+                self.chunks[key] = text
+                self.runs[key] = tuple(styled)
+        self.latest_id = next_id
         self.chunks = OrderedDict(sorted((key, text) for key, text in self.chunks.items() if key in retained_ids))
         while len(self.chunks) > self.max_chunks or (self.char_count > self.max_chars and len(self.chunks) > 1):
             self.chunks.popitem(last=False)
@@ -277,7 +300,7 @@ class TranslationCache:
                 runs.append(CaptionRun("\n"))
             runs.extend(self.runs.get(key, (CaptionRun(text),)))
         text = "".join(run.text for run in runs)
-        if len(text) <= max_chars:
+        if max_chars is None or len(text) <= max_chars:
             return tuple(runs)
         start = len(text) - max_chars
         start += len(text[start:]) - len(text[start:].lstrip())

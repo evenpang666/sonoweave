@@ -321,7 +321,7 @@ class SpeakerTracker:
 
 
 class SpeechSeparator:
-    """Two-speaker separation at 16 kHz. Called only for detected overlap."""
+    """Experimental offline utility; the caption pipeline does not use it."""
 
     def __init__(self):
         import onnxruntime as ort

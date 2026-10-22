@@ -20,6 +20,13 @@ def test_source_accumulates_across_pauses_but_replaces_only_current_draft():
     assert not cache.update(source(2, "stale", sequence=1))
 
 
+def test_full_caption_snapshot_never_slices_a_long_sentence_or_adds_ellipsis():
+    cache = TranslationCache(max_chars=20)
+    sentence = "这是一句必须从开头保留到结尾的字幕，" * 10 + "结束。"
+    cache.update((source(1, "source"),), (sentence,), {1})
+    assert "".join(run.text for run in cache.tail_runs(None)) == sentence
+
+
 def test_recent_complete_source_is_a_window_not_just_the_latest_sentence():
     cache = TranscriptCache()
     for key in range(1, 6):
@@ -58,8 +65,56 @@ def test_translation_cache_appends_and_revises_tail_without_losing_prefix():
     cache.update(segments, ("第一句。", "第二句。", "草稿"), {1, 2, 3})
     next_segments = (segments[1], replace(segments[2], text="corrected"), source(4, "new"))
     cache.update(next_segments, ("第二句已校准。", "修订后的第三句。", "新增第四句。"), {1, 2, 3, 4})
-    assert cache.snapshot() == ((1, "第一句。"), (2, "第二句已校准。"), (3, "修订后的第三句。"), (4, "新增第四句。"))
-    assert cache.tail() == "第一句。\n第二句已校准。\n修订后的第三句。\n新增第四句。"
+    assert cache.snapshot() == ((1, "第一句。"), (2, "第二句。"), (3, "修订后的第三句。"), (4, "新增第四句。"))
+    assert cache.tail() == "第一句。\n第二句。\n修订后的第三句。\n新增第四句。"
+
+
+def test_only_current_sentence_can_change_inside_one_utterance():
+    cache = TranslationCache()
+    part = source(1, "source", final=False)
+    cache.update((part,), ("已经显示的历史。当前草稿",), {1})
+    cache.update((part,), ("被模型重写的历史。当前草稿已修订",), {1})
+    assert cache.chunks[1] == "已经显示的历史。当前草稿已修订"
+    cache.update((part,), ("又被重写的历史。当前句已完成。第三句草稿",), {1})
+    assert cache.chunks[1] == "已经显示的历史。当前句已完成。第三句草稿"
+    cache.update((part,), ("改写第一句。改写第二句。第三句已更新",), {1})
+    assert cache.chunks[1] == "已经显示的历史。当前句已完成。第三句已更新"
+    cache.update((part,), ("被缩短为一句。",), {1})
+    assert cache.chunks[1] == "已经显示的历史。当前句已完成。第三句已更新"
+
+
+def test_current_sentence_is_editable_until_a_following_sentence_begins():
+    cache = TranslationCache()
+    part = source(1, "source", final=False)
+    cache.update((part,), ("临时句号。",), {1})
+    cache.update((part,), ("临时句号被修正，继续说下去",), {1})
+    assert cache.chunks[1] == "临时句号被修正，继续说下去"
+
+
+@pytest.mark.parametrize("ending", ["？", "！", "?", "!", "?!"])
+def test_question_and_exclamation_seal_history_text_and_color(ending):
+    from sonoweave.streaming import CaptionRun
+    cache = TranslationCache()
+    part = source(1, "source", final=False)
+    text = f"历史句子{ending}当前句子"
+    cache.update((part,), (text,), {1}, ((CaptionRun(text, 0),),))
+    revised = f"不允许改写{ending}新的草稿"
+    cache.update((part,), (revised,), {1}, ((CaptionRun(revised, 1),),))
+    assert cache.chunks[1] == f"历史句子{ending}新的草稿"
+    assert cache.runs[1] == (CaptionRun(f"历史句子{ending}", 0), CaptionRun("新的草稿", 1))
+
+
+def test_new_utterance_seals_previous_text_and_clear_resets_history():
+    cache = TranslationCache()
+    first, second = source(1, "one"), source(2, "two")
+    cache.update((first,), ("上一句",), {1})
+    cache.update((first, second), ("上一句的最后修订。", "当前句"), {1, 2})
+    cache.update((first, second), ("不允许的新历史。", "当前句的修订"), {1, 2})
+    assert cache.chunks[1] == "上一句的最后修订。"
+    assert cache.chunks[2] == "当前句的修订"
+    cache.clear()
+    cache.update((first,), ("新的会话。",), {1})
+    assert cache.chunks[1] == "新的会话。"
 
 
 def test_invalid_window_is_rejected_atomically():

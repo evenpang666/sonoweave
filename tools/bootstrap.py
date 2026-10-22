@@ -44,6 +44,7 @@ if sys.platform == 'linux':
 from importlib.metadata import version
 assert version('PySide6-Essentials') == '6.8.3'
 assert version('llama-cpp-python') == '0.3.36'
+assert int(version('av').split('.')[0]) < 19
 """
 
 
@@ -99,7 +100,7 @@ class Bootstrap:
 
     def fingerprint(self):
         digest = hashlib.sha256()
-        for name in ("requirements-base.txt", "requirements.txt", "requirements-cpu.txt", "tools/bootstrap.py"):
+        for name in ("requirements-base.txt", "requirements.txt", "requirements-cpu.txt", "requirements-cuda.txt", "tools/bootstrap.py"):
             digest.update(name.encode())
             digest.update((self.root / name).read_bytes())
         digest.update(f"{self.platform}:{PYTHON_VERSION}".encode())
@@ -114,7 +115,17 @@ class Bootstrap:
 
     def probe(self):
         try:
-            return subprocess.run([str(self.python), "-c", PROBE], cwd=self.root,
+            backend = self.state().get("backend")
+            if not backend and self.backend_path.is_file():
+                backend = self.backend_path.read_text(encoding="utf-8").strip()
+            code = PROBE
+            if backend in ("cuda", "vulkan", "cpu"):
+                code += "\nimport llama_cpp\nlib = Path(llama_cpp.__file__).parent / 'lib'\n"
+                if backend == "cpu":
+                    code += "assert not any(lib.glob('*ggml-cuda*')) and not any(lib.glob('*ggml-vulkan*'))\n"
+                else:
+                    code += f"assert any(lib.glob('*ggml-{backend}*'))\n"
+            return subprocess.run([str(self.python), "-c", code], cwd=self.root,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   timeout=45, check=False).returncode == 0
         except (OSError, subprocess.TimeoutExpired):
@@ -123,11 +134,39 @@ class Bootstrap:
     def ready(self, backend="auto"):
         state = self.state()
         return (self.python.is_file() and state.get("fingerprint") == self.fingerprint()
-                and state.get("backend") in ("cpu", "vulkan")
+                and state.get("backend") in ("cpu", "vulkan", "cuda")
                 and (backend == "auto" or state["backend"] == backend) and self.probe())
 
     def command(self, *args):
         subprocess.run([self.uv, "--no-config", *map(str, args)], cwd=self.root, check=True)
+
+    def select_backend(self, backend):
+        if backend != "auto":
+            return backend
+        state = self.state()
+        preference = state.get("preference")
+        if preference in ("cpu", "vulkan", "cuda"):
+            return preference
+        # Preserve earlier explicit CPU installations across upgrades.
+        try:
+            legacy = self.backend_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            try:
+                legacy = (self.environment / ".sonoweave-backend").read_text(encoding="utf-8").strip()
+            except OSError:
+                legacy = state.get("backend")
+        if legacy == "cpu":
+            return "cpu"
+        try:
+            result = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                                    capture_output=True, text=True, timeout=3, check=True,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if any(int(line.split(".")[0]) >= (551 if self.platform == "win32" else 550)
+                   for line in result.stdout.splitlines()):
+                return "cuda"
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        return "vulkan"
 
     def ensure_system_dependencies(self, backend):
         if self.platform != "linux" or os.environ.get("SONOWEAVE_SKIP_SYSTEM_DEPS") == "1":
@@ -184,17 +223,15 @@ class Bootstrap:
         if not self.uv:
             raise RuntimeError("uv executable is required")
         with setup_lock(self.runtime / "setup.lock"):
-            try:
-                requested = self.backend_path.read_text(encoding="utf-8").strip()
-            except OSError:
-                try:
-                    requested = (self.environment / ".sonoweave-backend").read_text(encoding="utf-8").strip()
-                except OSError:
-                    requested = "vulkan"
-            selected = (self.state().get("backend", requested) if backend == "auto" else backend)
-            if selected not in ("cpu", "vulkan"):
-                selected = "vulkan"
+            preference = self.state().get("preference", "auto") if backend == "auto" else backend
+            selected = self.select_backend(backend)
             if self.ready(selected):
+                if backend != "auto":
+                    state = self.state()
+                    state["preference"] = preference
+                    temporary = self.stamp.with_suffix(".tmp")
+                    temporary.write_text(json.dumps(state), encoding="utf-8")
+                    temporary.replace(self.stamp)
                 print(f"Environment ready (Python 3.12, {selected}).", flush=True)
                 return
             self.backend_path.write_text(selected, encoding="utf-8")
@@ -203,7 +240,8 @@ class Bootstrap:
             previous = self.state().get("backend")
             # A failed/partial installation must never leave a valid ready marker.
             self.stamp.unlink(missing_ok=True)
-            requirements = "requirements-cpu.txt" if selected == "cpu" else "requirements.txt"
+            requirements = {"cpu": "requirements-cpu.txt", "cuda": "requirements-cuda.txt",
+                            "vulkan": "requirements.txt"}[selected]
             print(f"Installing application dependencies ({selected})...", flush=True)
             # Keep the wheel index scoped to llama.cpp. uv's first-index policy
             # would otherwise hide ordinary PyPI packages behind the wheel index.
@@ -212,13 +250,14 @@ class Bootstrap:
             if previous != selected or not self.probe():
                 repair_llama = ["--reinstall"] if not self.probe() else ["--reinstall-package", "llama-cpp-python"]
                 self.command("pip", "install", "--python", self.python, *repair_llama,
-                             "--index", BACKEND_INDEX.format(selected),
+                             "--index", BACKEND_INDEX.format("cu124" if selected == "cuda" else selected),
                              "--only-binary", "llama-cpp-python", "llama-cpp-python==0.3.36")
             if not self.probe():
                 raise RuntimeError("Dependency verification failed. Retry Install; check system libraries and GPU drivers.")
             temporary = self.stamp.with_suffix(".tmp")
             temporary.write_text(json.dumps({"fingerprint": self.fingerprint(), "backend": selected,
-                                             "python": "3.12", "requirements": requirements}), encoding="utf-8")
+                                             "python": "3.12", "requirements": requirements,
+                                             "preference": preference}), encoding="utf-8")
             temporary.replace(self.stamp)
             print(f"Environment ready (Python 3.12, {selected}). Models download on first use.", flush=True)
 
@@ -227,7 +266,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--uv", type=Path)
-    parser.add_argument("--backend", choices=("auto", "cpu", "vulkan"), default="auto")
+    parser.add_argument("--backend", choices=("auto", "cpu", "vulkan", "cuda"), default="auto")
     args = parser.parse_args()
     setup = Bootstrap(uv=args.uv)
     if args.check:

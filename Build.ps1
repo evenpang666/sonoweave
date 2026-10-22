@@ -6,11 +6,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Environment setup failed.' }
 # uv-created application environments do not include pip by default.
 & $python -m ensurepip
 if ($LASTEXITCODE -ne 0) { throw 'pip bootstrap failed.' }
-& $python -m pip install -r requirements-dev.txt
+# Runtime dependencies (including the selected CPU/Vulkan backend) are ready.
+# Install only the build tool; requirements-dev.txt selects Vulkan again.
+& $python -m pip --disable-pip-version-check install 'pyinstaller>=6.10,<7'
 if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
 $bundlePath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'dist\SonoWeave'))
 if (-not $bundlePath.StartsWith($PSScriptRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid build output path.' }
-& $python -m PyInstaller --noconfirm --windowed --onedir --name SonoWeave --collect-data soundcard --collect-all faster_whisper --collect-all ctranslate2 --collect-all sherpa_onnx --collect-all onnxruntime --collect-all llama_cpp --collect-data certifi main.py
+& $python tools\build_bundle.py
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $PSScriptRoot 'dist\SonoWeave\README.md')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination (Join-Path $PSScriptRoot 'dist\SonoWeave\LICENSE')

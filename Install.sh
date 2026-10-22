@@ -6,13 +6,15 @@ if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then
     echo "This installer supports Linux x86_64." >&2
     exit 1
 fi
-backend=vulkan
+backend=auto
 ensure=false
 case ${1:-} in
     "") ;;
     --cpu) backend=cpu ;;
+    --cuda) backend=cuda ;;
+    --vulkan) backend=vulkan ;;
     --ensure) backend=auto; ensure=true ;;
-    *) echo "Usage: bash Install.sh [--cpu]" >&2; exit 2 ;;
+    *) echo "Usage: bash Install.sh [--cpu | --cuda | --vulkan]" >&2; exit 2 ;;
 esac
 if (( $# > 1 )); then echo "Too many installation arguments." >&2; exit 2; fi
 if [[ $ensure == true && -x .venv-linux/bin/python ]] && \

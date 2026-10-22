@@ -6,6 +6,16 @@ from sonoweave.audio import AudioWindow
 from sonoweave.recognition import AdaptiveDecoding, LanguageTracker
 
 
+def test_audio_decoder_accepts_pyav_open_options(tmp_path):
+    import wave
+    from faster_whisper.audio import decode_audio
+    path = tmp_path / "sample.wav"
+    with wave.open(str(path), "wb") as stream:
+        stream.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        stream.writeframes(np.zeros(1600, dtype="<i2").tobytes())
+    assert decode_audio(str(path), sampling_rate=16000).shape == (1600,)
+
+
 def window(key=1, seconds=3, started=0):
     return AudioWindow(key, 1, np.zeros(round(seconds * 16000), dtype=np.float32), False,
                        started, started + seconds)
