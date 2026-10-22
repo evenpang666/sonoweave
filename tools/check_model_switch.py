@@ -16,8 +16,9 @@ from PySide6 import QtWidgets
 from PySide6.QtCore import QTimer
 import sonoweave.engine as implementation
 from sonoweave.window import CaptionWindow
+from sonoweave import __version__
 
-report = {"version": "0.5.0", "system_audio_captured": False, "model_sequence": [], "errors": []}
+report = {"version": __version__, "system_audio_captured": False, "model_sequence": [], "errors": []}
 
 
 def no_capture(stop, on_audio, on_status):

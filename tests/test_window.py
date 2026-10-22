@@ -56,3 +56,9 @@ def test_visible_tail_keeps_recent_lines_without_changing_the_source_text(app):
     text = "First\nSecond\nThird\nFourth\nFifth"
     assert caption_tail(text, QFont("Segoe UI", 14), 600, max_lines=2) == "…Fourth\nFifth"
     assert text == "First\nSecond\nThird\nFourth\nFifth"
+
+
+def test_reconnect_is_available_even_without_a_component_error(app, tmp_path):
+    window = CaptionWindow(Settings(tmp_path / "settings.json"))
+    actions = [action.text() for action in window.context_menu().actions()]
+    assert "重新连接" in actions

@@ -168,7 +168,7 @@ class CaptionWindow(QWidget):
         self.set_translation_status("")
         self.model_changed.emit(model)
 
-    def contextMenuEvent(self, event) -> None:
+    def context_menu(self):
         menu = QMenu(self)
         languages = menu.addMenu("翻译为")
         group = QActionGroup(menu)
@@ -186,12 +186,14 @@ class CaptionWindow(QWidget):
             action.setChecked(key == self.settings.model)
             model_group.addAction(action)
             action.triggered.connect(lambda checked=False, model=key: self.choose_model(model))
-        if self._base_status[1]:
-            menu.addSeparator()
-            menu.addAction("重新连接", self.retry_requested.emit)
+        menu.addSeparator()
+        menu.addAction("重新连接", self.retry_requested.emit)
         menu.addSeparator()
         menu.addAction("退出", self.close)
-        menu.exec(event.globalPos())
+        return menu
+
+    def contextMenuEvent(self, event) -> None:
+        self.context_menu().exec(event.globalPos())
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:

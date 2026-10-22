@@ -39,6 +39,12 @@ class CaptionEngine(QObject):
         self.threads = []
         self.ready = set()
         self.errors = {}
+        self.translation_active_since = None
+        self.recognition_active_since = None
+        self.recognition_stall_seconds = 8
+        self.last_caption_at = 0.0
+        self.translation_stall_seconds = 8
+        self.stall_notified = False
 
     def start(self):
         if self.threads:
@@ -51,6 +57,42 @@ class CaptionEngine(QObject):
 
     def stop(self):
         self.stop_event.set()
+
+    def wait_stopped(self, timeout=8, cancelled=lambda: False):
+        deadline = time.monotonic() + timeout
+        for thread in self.threads:
+            while thread.is_alive():
+                remaining = deadline - time.monotonic()
+                if cancelled() or remaining <= 0:
+                    return False
+                thread.join(min(0.2, remaining))
+        return True
+
+    def check_health(self, now=None):
+        if self.stop_event.is_set():
+            return
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            since = self.translation_active_since
+            dead = next((thread.name for thread in self.threads
+                         if thread.name in ("translation", "recognition", "system-audio") and
+                         thread.ident is not None and not thread.is_alive()), None)
+            recognition_stuck = (self.recognition_active_since is not None and
+                                 now - self.recognition_active_since >= self.recognition_stall_seconds)
+            translation_stuck = since is not None and now - max(since, self.last_caption_at) >= self.translation_stall_seconds
+            if self.stall_notified or not (dead or recognition_stuck or translation_stuck):
+                return
+            self.stall_notified = True
+            revision = self.revision
+        log.warning("Caption worker stopped or made no progress: %s", dead or ("recognition" if recognition_stuck else "translation"))
+        if dead:
+            component = {"translation": "翻译", "recognition": "识别", "system-audio": "音频"}[dead]
+            message = f"{component}线程已停止，请右键重新连接"
+        elif recognition_stuck:
+            message = "识别暂时无进展，请右键重新连接"
+        else:
+            message = "翻译暂时无进展，请右键重新连接或切换 2B 模型"
+        self.translation_status.emit(message, True, revision)
 
     def set_target(self, target):
         if target not in LANGUAGES:
@@ -111,6 +153,7 @@ class CaptionEngine(QObject):
         if self.stop_event.is_set():
             return
         self._component_status("recognition")
+        self.recognition_stall_seconds = 30 if getattr(getattr(model, "model", None), "device", None) == "cpu" else 8
         language_tracker = LanguageTracker()
         decoding = AdaptiveDecoding()
         while not self.stop_event.is_set():
@@ -121,6 +164,8 @@ class CaptionEngine(QObject):
             if not window.final and time.monotonic() - window.ended > 4:
                 continue
             language_tracker.begin(window)
+            with self.lock:
+                self.recognition_active_since = time.monotonic()
             try:
                 if language_tracker.should_probe(window):
                     detected, probability, _ = model.detect_language(audio=window.audio[-128000:])
@@ -159,6 +204,9 @@ class CaptionEngine(QObject):
             except Exception:
                 log.exception("Speech recognition failed")
                 self._component_status("recognition", "语音识别暂时失败，正在继续聆听…", True)
+            finally:
+                with self.lock:
+                    self.recognition_active_since = None
 
     def _enqueue_audio(self, window):
         self.audio_queue.put(window.utterance_id, window)
@@ -177,15 +225,16 @@ class CaptionEngine(QObject):
         try:
             translator = Translator(model_path=path) if path is not None else Translator()
             translator.warmup()
-        except TranslationError as exc:
+        except Exception as exc:
             if translator is not None:
                 translator.close()
             log.exception("Offline translation initialization failed")
             if generation == self.model_generation:
-                self._component_status("translation", str(exc), True)
+                self._component_status("translation", str(exc) if isinstance(exc, TranslationError) else "翻译模型初始化异常，请右键重新连接", True)
             return
         if generation == self.model_generation and not self.stop_event.is_set():
             self._component_status("translation")
+        self.translation_stall_seconds = 30 if translator.device == "CPU" else 8
         delivered = (-1, -1, -1)
         try:
             while not self.stop_event.is_set() and generation == self.model_generation:
@@ -202,6 +251,9 @@ class CaptionEngine(QObject):
                     break
                 if job.revision != self.revision:
                     continue
+                with self.lock:
+                    self.translation_active_since = time.monotonic()
+                    self.stall_notified = False
                 try:
                     def cancelled():
                         latest = self.last_job
@@ -238,6 +290,13 @@ class CaptionEngine(QObject):
                     log.warning("Offline translation failed: %s", type(exc.__cause__).__name__)
                     if job.revision == self.revision:
                         self.translation_status.emit(str(exc), True, job.revision)
+                except Exception:
+                    log.exception("Unexpected translation job failure; continuing with later speech")
+                    if job.revision == self.revision:
+                        self.translation_status.emit("这次翻译异常，正在继续处理后续语音…", True, job.revision)
+                finally:
+                    with self.lock:
+                        self.translation_active_since = None
         finally:
             translator.close()
 
@@ -264,6 +323,7 @@ class CaptionEngine(QObject):
             if signature == self.last_published:
                 return
             self.last_published = signature
+            self.last_caption_at = now
         self.caption.emit(update)
         log.info("Caption cache: source=%d translated=%d segments=%d lag=%.3fs",
                  update.source_chars, update.translation_chars, update.translated_segments, update.lag_seconds)

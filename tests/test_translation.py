@@ -1,13 +1,19 @@
 from unittest.mock import Mock
 
 import pytest
-from sonoweave.translation import TranslationCancelled, TranslationError, Translator, UntranslatedOutput, build_prompt, build_retry_prompt, translation_units, function_fragment
+from sonoweave.translation import TranslationCancelled, TranslationError, TranslationTimeout, Translator, UntranslatedOutput, build_prompt, build_retry_prompt, translation_units, function_fragment, format_artifact
 
 
 def translator_with(text="译文"):
     llm = Mock()
+    llm.n_ctx.return_value = 2048
+    llm.tokenize.side_effect = lambda data, **kwargs: list(data)
     llm.create_completion.return_value = [{"choices": [{"text": text}]}]
     return Translator(llm), llm
+
+
+def completion_prompt(llm, index=-1):
+    return bytes(llm.create_completion.call_args_list[index].kwargs["prompt"]).decode("utf-8")
 
 
 def test_cache_includes_context_and_language():
@@ -114,7 +120,7 @@ def test_source_window_reuses_prefix_and_only_translates_changed_tail():
     originals = ("He was fishing by the river.", "He stood beside the bank.")
     result = translator.translate_segments(originals, "zh-CN", "en")
     assert result == ("他在河边钓鱼。", "他站在河岸旁。")
-    assert "He was fishing by the river." in llm.create_completion.call_args.kwargs["prompt"]
+    assert "He was fishing by the river." in completion_prompt(llm)
     translator.translate_segments(originals, "zh-CN", "en")
     assert llm.create_completion.call_count == 2
     translator.translate_segments((originals[0], "He sat on the bank."), "zh-CN", "en")
@@ -144,7 +150,7 @@ def test_chinese_prefix_cannot_hide_a_large_english_echo_and_retry_repairs_it():
         [{"choices": [{"text": "他们尝试这样做，但这根本没有影响。"}]}],
     ]
     assert translator.translate(original, "zh-CN", "en") == "他们尝试这样做，但这根本没有影响。"
-    assert "完整翻译成简体中文" in llm.create_completion.call_args.kwargs["prompt"]
+    assert "完整翻译成简体中文" in completion_prompt(llm)
 
 
 def test_failed_older_segment_does_not_block_new_speech_and_is_not_retried_forever():
@@ -216,7 +222,7 @@ def test_latest_segment_is_processed_first_and_result_stays_aligned():
                                            prioritize_latest=True, on_progress=lambda index, text: progress.append((index, text)))
     assert result == ("前一句。", "最新的句子。")
     assert progress[0] == (1, "最新的句子。")
-    assert '以下前文仅供消解指代，不得翻译或复述：["Earlier sentence."]' in llm.create_completion.call_args_list[0].kwargs["prompt"]
+    assert '以下前文仅供消解指代，不得翻译或复述：["Earlier sentence."]' in completion_prompt(llm, 0)
 
 
 def test_sentence_boundaries_preserve_names_numbers_and_all_source_characters():
@@ -251,3 +257,72 @@ def test_literal_fragment_rule_does_not_replace_complete_clauses_or_other_langua
     assert function_fragment("But I", "ja", "en") is None
     assert function_fragment("But I 2026", "zh-CN", "en") is None
     assert function_fragment("But I?", "zh-CN", "en") == "但我？"
+
+
+@pytest.mark.parametrize("output", ["n-", "n- n-", r"\n-", "-", "***", "n-\nn-"])
+def test_formatting_debris_is_retried_and_never_cached(output):
+    translator, llm = translator_with(output)
+    with pytest.raises(UntranslatedOutput):
+        translator.translate("The model is ready.", "zh-CN", "en")
+    assert not translator.cache
+    assert llm.create_completion.call_count == 2
+
+
+def test_n_dash_is_repaired_with_a_clean_retry():
+    translator, llm = translator_with()
+    llm.create_completion.side_effect = [
+        [{"choices": [{"text": "n-"}]}],
+        [{"choices": [{"text": "模型已准备好。"}]}],
+    ]
+    assert translator.translate("The model is ready.", "zh-CN", "en") == "模型已准备好。"
+    assert list(translator.cache.values()) == ["模型已准备好。"]
+
+
+def test_legitimate_hyphenated_names_formulas_and_literal_source_survive():
+    for source, result in (("An n-gram model.", "n-gram 模型。"), ("Subtract one from n.", "n-1"), ("n-", "n-")):
+        Translator._check_translation(source, result, "zh-CN", "en")
+
+
+def test_format_validation_handles_long_punctuation_without_backtracking():
+    assert not format_artifact("An ordinary source.", "-" * 10000 + "正文")
+    assert format_artifact("An ordinary source.", "n- " * 10000)
+
+
+def test_repeating_format_stream_is_closed_before_retry():
+    translator, llm = translator_with()
+    closed = []
+
+    def corrupt_stream():
+        try:
+            yield {"choices": [{"text": "n-n-n-n-"}]}
+            raise AssertionError("Should not keep consuming a corrupt stream")
+        finally:
+            closed.append(True)
+
+    llm.create_completion.side_effect = [corrupt_stream(), [{"choices": [{"text": "模型已准备好。"}]}]]
+    assert translator.translate("The model is ready.", "zh-CN", "en") == "模型已准备好。"
+    assert closed == [True]
+
+
+def test_generation_deadline_closes_stream_and_later_speech_still_works(monkeypatch):
+    translator, llm = translator_with()
+    clock = [0.0]
+    closed = []
+    monkeypatch.setattr("sonoweave.translation.time.monotonic", lambda: clock[0])
+
+    def slow_stream(**kwargs):
+        try:
+            yield {"choices": [{"text": "旧片段"}]}
+            clock[0] = 6.0
+            assert kwargs["stopping_criteria"]([], [])
+            yield {"choices": [{"text": "", "finish_reason": "stop"}]}
+        finally:
+            closed.append(True)
+
+    llm.create_completion.side_effect = slow_stream
+    with pytest.raises(TranslationTimeout):
+        translator.translate("A slow sentence.", "zh-CN", "en")
+    assert closed == [True] and not translator.cache
+    llm.create_completion.side_effect = None
+    llm.create_completion.return_value = [{"choices": [{"text": "下一句。"}]}]
+    assert translator.translate("The next sentence.", "zh-CN", "en") == "下一句。"

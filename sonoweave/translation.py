@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 from .config import translation_model_location
 from .streaming import bounded_context
+from .token_budget import SplitRequired, TokenBudget, TokenBudgetError
 
 log = logging.getLogger(__name__)
 TARGET_NAMES = {
@@ -28,8 +30,22 @@ class TranslationCancelled(Exception):
     pass
 
 
+class TranslationTimeout(TranslationError):
+    pass
+
+
 class UntranslatedOutput(TranslationError):
     pass
+
+
+def format_artifact(text, result):
+    """Reject standalone formatting debris, without damaging n-grams or formulas."""
+    if text.strip() == result.strip():
+        return False
+    # Fixed-width alternatives keep this linear even for long, malformed runs
+    # of punctuation followed by ordinary text.
+    debris_only = not re.sub(r"\\[nrt]|[nrt]|[-*•\s]", "", result, flags=re.IGNORECASE)
+    return debris_only and any(mark in result for mark in "-*•")
 
 
 def translation_units(text, max_chars=240):
@@ -126,6 +142,8 @@ def build_prompt(text, target, context=()):
 
 
 def build_retry_prompt(text, target):
+    if target not in ("zh-CN", "zh-TW"):
+        return build_prompt(text, target)
     language = "繁體中文" if target == "zh-TW" else "简体中文"
     text = text.replace("<|", "‹|").replace("|>", "|›")
     return (
@@ -159,13 +177,16 @@ def build_hy_prompt(text, target, context=()):
 class Translator:
     """In-process GGUF inference. No HTTP client, server, or automatic download."""
 
-    def __init__(self, llm=None, model_path=None):
+    def __init__(self, llm=None, model_path=None, context_size=2048):
         self.cache = OrderedDict()
         self.failed_prefixes = OrderedDict()
         self.llm = llm
         self.device = "injected"
         self.family = "qwen"
+        self.warming = False
+        self.token_budget = None
         if self.llm is not None:
+            self.token_budget = TokenBudget(self.llm)
             return
         path = Path(model_path) if model_path is not None else translation_model_location()
         self.family = "hunyuan" if "hy-mt" in path.name.lower() else "qwen"
@@ -174,7 +195,7 @@ class Translator:
         try:
             from llama_cpp import Llama, llama_supports_gpu_offload
             use_gpu = os.environ.get("SONOWEAVE_TRANSLATE_DEVICE", "auto") != "cpu" and llama_supports_gpu_offload()
-            options = dict(model_path=str(path), n_ctx=2048, n_batch=512, n_ubatch=256,
+            options = dict(model_path=str(path), n_ctx=context_size, n_batch=512, n_ubatch=256,
                            n_threads=min(6, max(2, (os.cpu_count() or 4) // 2)),
                            n_threads_batch=min(8, os.cpu_count() or 4), verbose=False, seed=0)
             try:
@@ -187,10 +208,18 @@ class Translator:
                 self.llm = Llama(**options, n_gpu_layers=0)
                 self.device = "CPU"
             log.info("Offline translation ready: %s, %s", path.name, self.device)
+            self.token_budget = TokenBudget(self.llm)
         except Exception as exc:
             raise TranslationError("离线翻译模型加载失败，请右键重试或检查模型文件") from exc
 
     def warmup(self):
+        self.warming = True
+        try:
+            self._warmup()
+        finally:
+            self.warming = False
+
+    def _warmup(self):
         # Vulkan compiles kernels on first use. Do this while the UI still says
         # loading, rather than making the first spoken sentence wait for it.
         self.translate("The model is ready.", "zh-CN", "en", context=("This is an offline subtitle translator.",))
@@ -245,13 +274,21 @@ class Translator:
     def translate(self, text, target, source="auto", context=(), should_cancel=None, on_progress=None):
         if should_cancel and should_cancel():
             raise TranslationCancelled
-        units = translation_units(text.strip())
+        units = deque(translation_units(text.strip()))
         if not units:
             return ""
         preceding = sentence_context(context)
         translated = []
-        for unit in units:
-            result = self._translate_piece(unit, target, source, preceding, should_cancel)
+        while units:
+            unit = units.popleft().strip()
+            if not unit:
+                continue
+            try:
+                result = self._translate_piece(unit, target, source, preceding, should_cancel)
+            except SplitRequired as split:
+                units.appendleft(unit[split.cut:])
+                units.appendleft(unit[:split.cut])
+                continue
             translated.append(result)
             if on_progress:
                 on_progress(" ".join(translated))
@@ -276,53 +313,87 @@ class Translator:
         if key in self.cache:
             self.cache.move_to_end(key)
             return self.cache[key]
-        prompt = build_hy_prompt(text, target, context) if self.family == "hunyuan" else build_prompt(text, target, context)
-        result = self._generate(prompt, text, should_cancel)
+        def check_cancel():
+            if should_cancel and should_cancel():
+                raise TranslationCancelled
+
+        build = (lambda value, reference: build_hy_prompt(value, target, reference)) if self.family == "hunyuan" else (
+            lambda value, reference: build_prompt(value, target, reference))
+        retry = (lambda value: build_hy_prompt(value, target)) if self.family == "hunyuan" else (
+            lambda value: build_retry_prompt(value, target))
         try:
+            plan = self.token_budget.prepare(text, context, build, retry, check_cancel)
+        except TokenBudgetError as exc:
+            raise TranslationError(str(exc)) from exc
+        context = plan.context
+        key = (text, target, source, context)
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        try:
+            result = self._generate(plan.tokens, plan.output_tokens, should_cancel)
             self._check_translation(text, result, target, source)
         except UntranslatedOutput:
             # A compact Chinese instruction is more reliable for difficult slang
             # than repeatedly accepting an English echo with a Chinese prefix.
-            retry = build_hy_prompt(text, target) if self.family == "hunyuan" else build_retry_prompt(text, target)
-            result = self._generate(retry, text, should_cancel)
+            result = self._generate(plan.retry_tokens, plan.output_tokens, should_cancel)
             self._check_translation(text, result, target, source)
         self.cache[key] = result
         if len(self.cache) > 256:
             self.cache.popitem(last=False)
         return result
 
-    def _generate(self, prompt, text, should_cancel):
+    def _generate(self, tokens, output_tokens, should_cancel):
         chunks = []
         truncated = False
+        stream = None
+        budget = 60 if self.warming else (20 if self.device == "CPU" else 5)
+        deadline = time.monotonic() + budget
+
+        def timed_out():
+            return time.monotonic() >= deadline
+
+        def check_stopped():
+            if should_cancel and should_cancel():
+                raise TranslationCancelled
+            if timed_out():
+                raise TranslationTimeout("这次翻译耗时过长，已跳过并继续处理后续语音…")
+
         try:
+            self.token_budget.validate(tokens, output_tokens)
             from llama_cpp import StoppingCriteriaList
-            stopping = StoppingCriteriaList([lambda ids, logits: bool(should_cancel and should_cancel())])
+            stopping = StoppingCriteriaList([lambda ids, logits: bool(timed_out() or (should_cancel and should_cancel()))])
             stream = self.llm.create_completion(
-                prompt=prompt, max_tokens=min(256, max(64, len(text) * 2)),
+                prompt=list(tokens), max_tokens=output_tokens,
                 temperature=0.7 if self.family == "hunyuan" else 0,
                 top_p=0.6 if self.family == "hunyuan" else 0.95,
                 top_k=20 if self.family == "hunyuan" else 1, repeat_penalty=1.05,
                 stop=["<|im_end|>", "<|endoftext|>"], stream=True, stopping_criteria=stopping,
             )
             for chunk in stream:
-                if should_cancel and should_cancel():
-                    raise TranslationCancelled
+                check_stopped()
                 choice = chunk["choices"][0]
                 chunks.append(choice["text"])
+                if re.search(r"(?:\bn-\s*){4,}|(?:\\n[-*]\s*){4,}", "".join(chunks)):
+                    raise UntranslatedOutput("模型输出了异常格式，正在重新校准…")
                 truncated = truncated or choice.get("finish_reason") == "length"
-            if should_cancel and should_cancel():
-                raise TranslationCancelled
+            check_stopped()
             result = re.sub(r"<think>.*?</think>", "", "".join(chunks), flags=re.DOTALL).strip()
             if not result or "<think>" in result or truncated:
                 raise ValueError("Empty or incomplete translation")
-        except TranslationCancelled:
+        except (TranslationCancelled, TranslationTimeout, UntranslatedOutput):
             raise
         except Exception as exc:
             raise TranslationError("离线翻译暂时失败，正在继续聆听…") from exc
+        finally:
+            if stream is not None and callable(getattr(stream, "close", None)):
+                stream.close()
         return result
 
     @staticmethod
     def _check_translation(text, result, target, source):
+        if format_artifact(text, result):
+            raise UntranslatedOutput("模型输出了异常格式，正在重新校准…")
         words = re.findall(r"[A-Za-z]+", text)
         if target in ("zh-CN", "zh-TW") and source not in ("zh", "zh-CN", "zh-TW"):
             han = len(re.findall(r"[\u3400-\u9fff]", result))

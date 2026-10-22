@@ -56,6 +56,15 @@ def main() -> int:
             self.engine_status = ("正在加载离线识别与翻译模型…", False)
             self.preparation_status.connect(self.receive_preparation_status)
             self.preparation_finished.connect(self.receive_preparation_finished)
+            self.health_timer = QTimer(self)
+            self.health_timer.setInterval(1000)
+            self.health_timer.timeout.connect(self.check_health)
+            self.health_timer.start()
+
+        @Slot()
+        def check_health(self):
+            if self.engine and not self.closing:
+                self.engine.check_health()
 
         @Slot()
         def start(self):
@@ -87,8 +96,10 @@ def main() -> int:
                 try:
                     with self.preparation_lock:
                         if old:
-                            for thread in old.threads:
-                                thread.join()
+                            if not old.wait_stopped(cancelled=cancel.is_set):
+                                if cancel.is_set():
+                                    raise DownloadCancelled
+                                raise RuntimeError("旧任务仍未退出，请关闭声屿后重新启动")
                         path = ensure_models(selected,
                             progress=lambda text: self.preparation_status.emit(generation, text),
                             cancelled=cancel.is_set)

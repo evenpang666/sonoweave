@@ -5,6 +5,7 @@ from unittest.mock import Mock
 from types import SimpleNamespace
 
 import numpy as np
+from PySide6.QtCore import Qt
 
 from sonoweave.engine import CaptionEngine
 from sonoweave.streaming import ContextMemory, LatestQueue, TextJob, SourceChunk
@@ -253,3 +254,80 @@ def test_speech_retained_by_whisper_confidence_is_not_discarded_again(app, monke
     finally:
         engine.stop()
         worker.join(3)
+
+
+def test_unexpected_job_exception_does_not_kill_translation_worker(app, monkeypatch):
+    engine = CaptionEngine("zh-CN")
+    translator = Mock(device="GPU")
+    received, done = [], threading.Event()
+    engine.last_job = job()
+    engine.text_queue.put(1, engine.last_job)
+
+    def translate(*args, **kwargs):
+        if translator.translate.call_count == 1:
+            engine.last_job = job(utterance_id=2)
+            engine.text_queue.put(2, engine.last_job)
+            raise RuntimeError("Unexpected backend failure")
+        return "后续字幕。"
+
+    translator.translate.side_effect = translate
+    monkeypatch.setattr("sonoweave.engine.Translator", lambda: translator)
+
+    def caption(update):
+        received.append(update.text)
+        done.set()
+
+    engine.caption.connect(caption, Qt.ConnectionType.DirectConnection)
+    worker = threading.Thread(target=engine._translate)
+    worker.start()
+    try:
+        assert done.wait(3)
+        assert received == ["后续字幕。"]
+        assert worker.is_alive()
+    finally:
+        engine.stop()
+        worker.join(3)
+
+
+def test_stalled_generation_warns_once_but_idle_audio_does_not(app):
+    engine = CaptionEngine("zh-CN")
+    warnings = []
+    engine.translation_status.connect(lambda text, error, revision: warnings.append((text, error, revision)))
+    engine.check_health(now=100)
+    assert not warnings
+    engine.translation_active_since = 1
+    engine.last_caption_at = 2
+    engine.check_health(now=11)
+    engine.check_health(now=12)
+    assert len(warnings) == 1 and warnings[0][1] is True
+    engine.translation_active_since = None
+    engine.check_health(now=200)
+    assert len(warnings) == 1
+
+
+def test_reconnect_wait_is_bounded_and_cancellable(app):
+    engine = CaptionEngine("zh-CN")
+    stuck = Mock()
+    stuck.is_alive.return_value = True
+    stuck.join.side_effect = time.sleep
+    engine.threads = [stuck]
+    assert not engine.wait_stopped(timeout=0.01)
+    assert not engine.wait_stopped(cancelled=lambda: True)
+
+
+def test_dead_translation_thread_is_reported_even_without_an_active_job(app):
+    engine = CaptionEngine("zh-CN")
+    engine.threads = [SimpleNamespace(name="translation", ident=1, is_alive=lambda: False)]
+    warnings = []
+    engine.translation_status.connect(lambda text, error, revision: warnings.append(text))
+    engine.check_health()
+    assert len(warnings) == 1 and "线程已停止" in warnings[0]
+
+
+def test_stuck_recognition_is_reported_even_if_translation_is_idle(app):
+    engine = CaptionEngine("zh-CN")
+    engine.recognition_active_since = 1
+    warnings = []
+    engine.translation_status.connect(lambda text, error, revision: warnings.append(text))
+    engine.check_health(now=10)
+    assert len(warnings) == 1 and "识别暂时无进展" in warnings[0]
