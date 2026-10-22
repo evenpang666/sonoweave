@@ -74,6 +74,33 @@ class ContextMemory:
 
 
 @dataclass(frozen=True)
+class CaptionRun:
+    text: str
+    speaker: int | None = None
+
+
+@dataclass(frozen=True)
+class TimedWord:
+    text: str
+    start: float
+    end: float
+
+
+def slice_runs(runs, start=0, end=None):
+    """Slice styled text using Python character offsets, retaining identities."""
+    result, offset = [], 0
+    for run in runs:
+        stop = offset + len(run.text)
+        text = run.text[max(0, start - offset):None if end is None else max(0, end - offset)]
+        if text:
+            result.append(CaptionRun(text, run.speaker))
+        offset = stop
+        if end is not None and offset >= end:
+            break
+    return tuple(result)
+
+
+@dataclass(frozen=True)
 class TextJob:
     text: str
     source: str
@@ -101,6 +128,7 @@ class CaptionUpdate:
     source_chars: int = 0
     translation_chars: int = 0
     translated_segments: int = 0
+    runs: tuple[CaptionRun, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,6 +140,9 @@ class SourceChunk:
     final: bool
     started: float
     ended: float
+    runs: tuple[CaptionRun, ...] = ()
+    words: tuple[TimedWord, ...] = ()
+    separated: bool = False
 
 
 def remove_overlap(previous, current):
@@ -138,18 +169,20 @@ class TranscriptCache:
     def char_count(self):
         return sum(len(chunk.text) for chunk in self.chunks.values())
 
-    def update(self, chunk, overlap_previous=False):
+    def update(self, chunk, overlap_previous=False, *, allow_same_sequence=False):
         previous = self.chunks.get(chunk.utterance_id)
-        if previous and chunk.sequence <= previous.sequence:
+        if previous and (chunk.sequence < previous.sequence or
+                         (chunk.sequence == previous.sequence and not allow_same_sequence)):
             return False
         if overlap_previous:
             preceding = [part for part in self.chunks.values() if part.utterance_id < chunk.utterance_id]
             if preceding:
                 from dataclasses import replace
-                chunk = replace(chunk, text=remove_overlap(preceding[-1].text, chunk.text))
+                text = remove_overlap(preceding[-1].text, chunk.text)
+                chunk = replace(chunk, text=text, runs=slice_runs(chunk.runs, len(chunk.text) - len(text)))
         if not chunk.text:
             return False
-        if previous and chunk.text == previous.text and chunk.final == previous.final:
+        if previous and chunk.text == previous.text and chunk.final == previous.final and chunk.runs == previous.runs:
             # Track sequence to reject stale windows without scheduling identical work.
             self.chunks[chunk.utterance_id] = chunk
             return False
@@ -161,6 +194,15 @@ class TranscriptCache:
 
     def snapshot(self):
         return tuple(self.chunks.values())
+
+    def relabel(self, utterance_id, runs):
+        from dataclasses import replace
+        chunk = self.chunks.get(utterance_id)
+        if chunk is None or chunk.runs == runs or "".join(run.text for run in runs) != chunk.text:
+            return False
+        self.chunks[utterance_id] = replace(chunk, runs=runs)
+        self.version += 1
+        return True
 
     def recent(self, max_chars=640, max_chunks=3):
         selected = []
@@ -194,6 +236,7 @@ class TranslationCache:
 
     def __init__(self, max_chars=8000, max_chunks=96):
         self.chunks = OrderedDict()
+        self.runs = {}
         self.max_chars = max_chars
         self.max_chunks = max_chunks
 
@@ -203,24 +246,40 @@ class TranslationCache:
 
     def clear(self):
         self.chunks.clear()
+        self.runs.clear()
 
-    def update(self, segments, translations, retained_ids):
+    def update(self, segments, translations, retained_ids, runs=None):
         if len(segments) != len(translations) or any(text is not None and (not isinstance(text, str) or not text.strip()) for text in translations):
             raise ValueError("Translation/source alignment mismatch")
-        for segment, text in zip(segments, translations):
+        if runs is not None and (len(runs) != len(segments) or any(
+                text is not None and "".join(run.text for run in styled) != text.strip()
+                for text, styled in zip(translations, runs))):
+            raise ValueError("Styled translation/source alignment mismatch")
+        for index, (segment, text) in enumerate(zip(segments, translations)):
             if text is not None and segment.utterance_id in retained_ids:
                 self.chunks[segment.utterance_id] = text.strip()
+                self.runs[segment.utterance_id] = runs[index] if runs is not None else (CaptionRun(text.strip()),)
         self.chunks = OrderedDict(sorted((key, text) for key, text in self.chunks.items() if key in retained_ids))
         while len(self.chunks) > self.max_chunks or (self.char_count > self.max_chars and len(self.chunks) > 1):
             self.chunks.popitem(last=False)
+        self.runs = {key: value for key, value in self.runs.items() if key in self.chunks}
 
     def snapshot(self):
         return tuple(self.chunks.items())
 
     def tail(self, max_chars=180):
-        text = "\n".join(self.chunks.values())
+        return "".join(run.text for run in self.tail_runs(max_chars))
+
+    def tail_runs(self, max_chars=180):
+        runs = []
+        for key, text in self.chunks.items():
+            if runs:
+                runs.append(CaptionRun("\n"))
+            runs.extend(self.runs.get(key, (CaptionRun(text),)))
+        text = "".join(run.text for run in runs)
         if len(text) <= max_chars:
-            return text
-        text = text[-max_chars:]
+            return tuple(runs)
+        start = len(text) - max_chars
+        start += len(text[start:]) - len(text[start:].lstrip())
         # A subtitle shows the recent tail; the full retained text stays in memory.
-        return "…" + text.lstrip()
+        return (CaptionRun("…"), *slice_runs(runs, start))

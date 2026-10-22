@@ -1,17 +1,97 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QActionGroup, QColor, QFont, QPainter, QPen, QTextLayout, QTextOption
-from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QSizeGrip, QVBoxLayout, QWidget
+from PySide6.QtCore import QPoint, QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import QActionGroup, QColor, QFont, QPainter, QPen, QTextCharFormat, QTextLayout, QTextOption
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QMenu, QSizeGrip, QVBoxLayout, QWidget
 
 from .config import LANGUAGES, TRANSLATION_MODELS, Settings
+from .streaming import CaptionRun, slice_runs
+
+
+SPEAKER_COLORS = ("#F3F5FA", "#8FD3FF", "#FFD58A", "#B9E89A", "#D9B5FF", "#FFADBC", "#8EE3D8", "#E8DF9C")
+
+
+def speaker_color(speaker):
+    return SPEAKER_COLORS[speaker % len(SPEAKER_COLORS)] if speaker is not None else SPEAKER_COLORS[0]
+
+
+class CaptionLabel(QLabel):
+    """Plain text with per-speaker formats; no HTML interpretation or extra UI."""
+
+    def __init__(self, text):
+        super().__init__(text)
+        self.runs = ()
+
+    def set_runs(self, runs):
+        self.runs = tuple(runs)
+        self.update()
+
+    def paintEvent(self, event):
+        if not self.runs or "".join(run.text for run in self.runs) != self.text():
+            return super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setPen(QColor(SPEAKER_COLORS[0]))
+        layouts, height, offset = [], 0.0, 0
+        for paragraph in self.text().split("\n"):
+            layout = QTextLayout(paragraph, self.font())
+            option = QTextOption()
+            option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            option.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            layout.setTextOption(option)
+            formats, position = [], 0
+            for run in slice_runs(self.runs, offset, offset + len(paragraph)):
+                span = QTextLayout.FormatRange()
+                span.start = position
+                span.length = len(run.text.encode("utf-16-le")) // 2
+                span.format = QTextCharFormat()
+                span.format.setForeground(QColor(speaker_color(run.speaker)))
+                formats.append(span)
+                position += span.length
+            layout.setFormats(formats)
+            layout.beginLayout()
+            while True:
+                line = layout.createLine()
+                if not line.isValid():
+                    break
+                line.setLineWidth(self.contentsRect().width())
+                line.setPosition(QPointF(0, height))
+                height += line.height()
+            layout.endLayout()
+            if not paragraph:
+                height += self.fontMetrics().height()
+            layouts.append(layout)
+            offset += len(paragraph) + 1
+        origin = QPointF(self.contentsRect().x(), self.contentsRect().y() + max(0, (self.contentsRect().height() - height) / 2))
+        for layout in layouts:
+            layout.draw(painter, origin)
+        painter.end()
 
 
 def caption_tail(text, font, width, max_lines=4):
+    start = caption_tail_start(text, font, width, max_lines)
+    return "…" + text[start:] if start else text
+
+
+def caption_tail_start(text, font, width, max_lines=4):
     """Display a few most recent visual lines while keeping the text cache intact."""
+    positions = caption_line_starts(text, font, width)
+    if len(positions) <= max_lines:
+        return 0
+    start = positions[-max_lines]
+    start += len(text[start:]) - len(text[start:].lstrip())
+    # The added ellipsis also takes space and must not create an extra line.
+    while start < len(text) and len(caption_line_starts("…" + text[start:], font, width)) > max_lines:
+        start += 1
+        start += len(text[start:]) - len(text[start:].lstrip())
+    return start
+
+
+def caption_line_starts(text, font, width):
     positions = []
     offset = 0
     for paragraph in text.split("\n"):
+        if not paragraph:
+            positions.append(offset)
         layout = QTextLayout(paragraph, font)
         option = QTextOption()
         option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
@@ -27,21 +107,21 @@ def caption_tail(text, font, width, max_lines=4):
             positions.append(offset + len(prefix))
         layout.endLayout()
         offset += len(paragraph) + 1
-    if len(positions) <= max_lines:
-        return text
-    return "…" + text[positions[-max_lines]:].lstrip()
+    return positions
 
 
 class CaptionWindow(QWidget):
     target_changed = Signal(str)
     retry_requested = Signal()
     model_changed = Signal(str)
+    speaker_colors_changed = Signal(bool)
 
     def __init__(self, settings: Settings):
         super().__init__()
         self.settings = settings
         self.has_caption = False
         self._caption_text = ""
+        self._caption_runs = ()
         self._drag: QPoint | None = None
         self._base_status = ("正在准备语音模型…", False)
         self._translation_error = ""
@@ -83,8 +163,8 @@ class CaptionWindow(QWidget):
         self.language_label = QLabel(LANGUAGES[settings.target], objectName="language")
         header.addWidget(self.language_label)
         layout.addLayout(header)
-        self.caption_label = QLabel("让每一句，都听得懂。")
-        font = QFont("Microsoft YaHei UI", 23, QFont.Weight.Medium)
+        self.caption_label = CaptionLabel("让每一句，都听得懂。")
+        font = QFont("Microsoft YaHei UI", settings.font_size, QFont.Weight.Medium)
         font.setFamilies(["Microsoft YaHei UI", "Noto Sans CJK SC", "Noto Sans", "DejaVu Sans"])
         self.caption_label.setFont(font)
         self.caption_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -107,23 +187,30 @@ class CaptionWindow(QWidget):
             self.resize(min(860, max(440, rect.width() - 48)), 174)
             self.move(rect.center().x() - self.width() // 2, rect.bottom() - self.height() - 60)
 
-    def set_caption(self, text: str, final: bool = True) -> None:
+    def set_caption(self, text: str, final: bool = True, runs=()) -> None:
         self.has_caption = True
         self._caption_text = text
+        self._caption_runs = tuple(runs) if "".join(run.text for run in runs) == text else ()
         self._render_caption()
         self.hint.setText("离线 · 尾部已校准  ·  右键切换语言" if final else "离线 · 持续缓存与校准  ·  右键切换语言")
         self.adjust_height()
 
     def _render_caption(self):
-        text = caption_tail(self._caption_text, self.caption_label.font(), max(100, self.surface.width() - 52))
+        room = max(1, int((self.screen().availableGeometry().height() - 128) /
+                          max(1, self.caption_label.fontMetrics().lineSpacing())))
+        start = caption_tail_start(self._caption_text, self.caption_label.font(),
+                                   max(100, self.surface.width() - 52), min(self.settings.caption_lines, room))
+        text = ("…" if start else "") + self._caption_text[start:]
         if text != self.caption_label.text():
             self.caption_label.setText(text)
+        runs = slice_runs(self._caption_runs, start) if self.settings.speaker_colors else ()
+        self.caption_label.set_runs(((CaptionRun("…"),) if start and runs else ()) + runs)
 
     def adjust_height(self) -> None:
         available = max(100, self.surface.width() - 52)
         height = self.caption_label.heightForWidth(available)
         screen = self.screen().availableGeometry()
-        required = min(max(174, height + 104), int(screen.height() * 0.65))
+        required = min(max(174, height + 104), screen.height() - 24)
         bottom = self.geometry().bottom()
         self.resize(self.width(), required)
         self.move(self.x(), max(screen.top(), bottom - required + 1))
@@ -170,6 +257,49 @@ class CaptionWindow(QWidget):
         self.set_translation_status("")
         self.model_changed.emit(model)
 
+    def choose_speaker_colors(self, enabled: bool) -> None:
+        if enabled == self.settings.speaker_colors:
+            return
+        try:
+            self.settings.save_speaker_colors(enabled)
+        except OSError:
+            self.set_status("无法保存人声配色设置，请检查目录权限", True)
+            return
+        if not enabled:
+            self._caption_runs = ()
+        if self.has_caption:
+            self._render_caption()
+        self.speaker_colors_changed.emit(enabled)
+
+    def choose_font_size(self, size: int) -> None:
+        try:
+            self.settings.save_font_size(size)
+        except OSError:
+            self.set_status("无法保存字体设置，请检查目录权限", True)
+            return
+        font = self.caption_label.font()
+        font.setPointSize(size)
+        self.caption_label.setFont(font)
+        self._refresh_layout()
+
+    def choose_caption_lines(self, lines: int) -> None:
+        try:
+            self.settings.save_caption_lines(lines)
+        except OSError:
+            self.set_status("无法保存行数设置，请检查目录权限", True)
+            return
+        self._refresh_layout()
+
+    def _refresh_layout(self):
+        if self.has_caption:
+            self._render_caption()
+        self.adjust_height()
+
+    def custom_font_size(self):
+        size, accepted = QInputDialog.getInt(self, "字幕字体大小", "字号（pt）：", self.settings.font_size, 12, 48)
+        if accepted:
+            self.choose_font_size(size)
+
     def context_menu(self):
         menu = QMenu(self)
         languages = menu.addMenu("翻译为")
@@ -188,6 +318,29 @@ class CaptionWindow(QWidget):
             action.setChecked(key == self.settings.model)
             model_group.addAction(action)
             action.triggered.connect(lambda checked=False, model=key: self.choose_model(model))
+        menu.addSeparator()
+        speakers = menu.addAction("人声配色")
+        speakers.setCheckable(True)
+        speakers.setChecked(self.settings.speaker_colors)
+        speakers.triggered.connect(self.choose_speaker_colors)
+        sizes = menu.addMenu("字体大小")
+        size_group = QActionGroup(menu)
+        for size in sorted({12, 16, 20, 23, 28, 32, 40, 48, self.settings.font_size}):
+            action = sizes.addAction(f"{size} pt" + ("（默认）" if size == 23 else ""))
+            action.setCheckable(True)
+            action.setChecked(size == self.settings.font_size)
+            size_group.addAction(action)
+            action.triggered.connect(lambda checked=False, value=size: self.choose_font_size(value))
+        sizes.addSeparator()
+        sizes.addAction("自定义…", self.custom_font_size)
+        lines = menu.addMenu("显示行数")
+        line_group = QActionGroup(menu)
+        for count in range(1, 11):
+            action = lines.addAction(f"{count} 行" + ("（默认）" if count == 4 else ""))
+            action.setCheckable(True)
+            action.setChecked(count == self.settings.caption_lines)
+            line_group.addAction(action)
+            action.triggered.connect(lambda checked=False, value=count: self.choose_caption_lines(value))
         menu.addSeparator()
         menu.addAction("重新连接", self.retry_requested.emit)
         menu.addSeparator()
@@ -221,7 +374,7 @@ class CaptionWindow(QWidget):
     def _fit_after_resize(self) -> None:
         # Only increase height during manual width changes; avoid recursive resize events.
         required = self.caption_label.heightForWidth(max(100, self.surface.width() - 52)) + 104
-        limit = int(self.screen().availableGeometry().height() * 0.65)
+        limit = self.screen().availableGeometry().height() - 24
         if self.height() < min(required, limit):
             self.resize(self.width(), min(required, limit))
 

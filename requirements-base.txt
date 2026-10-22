@@ -2,6 +2,8 @@ PySide6-Essentials==6.8.3
 soundcard>=0.4.3,<0.5
 pulsectl>=24.12,<25; sys_platform == "linux"
 faster-whisper>=1.1,<2
+sherpa-onnx==1.13.8
+onnxruntime>=1.20,<2
 numpy>=1.26,<3
 requests>=2.32,<3
 filelock>=3.16,<4

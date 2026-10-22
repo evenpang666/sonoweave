@@ -43,6 +43,8 @@
 
 自动下载及准备脚本可使用 `HF_ENDPOINT` 和 `HTTPS_PROXY`；它们仅用于获取模型文件。技术参考：[SoundCard](https://soundcard.readthedocs.io/en/latest/)、[faster-whisper](https://github.com/SYSTRAN/faster-whisper)、[llama-cpp-python](https://github.com/abetlen/llama-cpp-python)。
 
+人声配色默认关闭，默认组合不包含额外的人声模型。需要提前准备时给 `PrepareModels.bat` / `PrepareModels.sh` 添加 `--speaker-colors`；也可在右键菜单首次开启时自动下载。右键还可设置字号（12–48 pt，默认 23）和显示行数（1–10，默认 4），均即时生效并持久化。
+
 ## 仓库与产物
 
 - 提交源码、自动化测试、依赖声明和维护文档。`tests/`、`tools/` 保留跟踪。
@@ -52,6 +54,8 @@
 - `.gitignore` 不会自动取消已有跟踪；排除已跟踪产物需使用 `git rm --cached`，保留本地文件。历史提交不会因此被改写。
 
 测试脚本的成功输出不代表翻译语义全部正确。当前仍有历史事件序数、专名和习语错译，也可能出现较长的无新字幕间隔；识别未提供新原文的停顿不计入“原文增长但译文停滞”指标。未保存并标注参照音频时，不推断总体准确率或把无新字幕一概当作软件排队延迟。
+
+人声着色的回归测试位于 `tests/test_speakers.py` 和 `tests/test_window.py`，覆盖身份复用、未知及重叠范围、颜色延后发布、旧任务拒绝、音频重叠去重、Unicode 与四行裁剪。测试使用受控时间与声纹向量，不代表真实人声准确率。真实模型验证可使用 sherpa-onnx 官方公开的 `0-four-speakers-zh.wav`，测试音频、推理报告及截图均放在被忽略的 `.cache/speaker-test`，不纳入发布包。
 
 ## 异常输出与停滞恢复（0.5.1）
 
@@ -72,3 +76,11 @@
 此脚本依次使用本地 4B 和 2B，阻断 Python socket 连接。验证默认 2048-token 窗口中的生僻字边界、JSON 转义后的重试预算、正常翻译及异常输出后的跨语言重试；再以实际 512-token 小窗口强制触发拆分，检查原文完整性与逐段进度。512 仅用于边界验证，桌面默认值仍为 2048。所有生成调用都会审计输入长度、256-token 输出预留和 8-token 余量。
 
 结果写入被忽略的 `artifacts/context-budget-v052.json`，不采集系统声音，也不把模型或验证数据纳入版本控制。上下文检查通过不代表所有翻译都语义正确。
+
+## 人声与重叠回归
+
+`tests/test_speech_overlap.py` 覆盖局部身份互斥、跨窗上下文、重叠区域不学习声纹、分离输出幅度、双路译文标签、旧任务拒绝及普通 ASR 序号增长后的颜色发布。后台分离按需加载独立 CPU 识别器，不锁住主识别器。
+
+`SONOWEAVE_TEST_SPEAKER_MODELS=1 .venv-linux/bin/python -m pytest tests/test_speakers_models.py -q` 可运行本地真实模型检查，缺少公共语音样本或模型时跳过。`.cache/speaker-test/four-speakers.wav` 来自 sherpa-onnx 官方 `speaker-segmentation-models/0-four-speakers-zh.wav`；`.cache/speaker-test/clean-overlap.npz` 使用公开 LibriSpeech 两个不同说话人的录音，分别来自 `hf-internal-testing/librispeech_asr_dummy` 的 clean/validation 首条和 `openslr/librispeech_asr` 的 clean/test 首条，补齐长度并按相同 RMS 混合，键为 `a`、`b`、`mix`。检查推理期间禁止 Python 网络连接，不播放声音。
+
+真实模型检查验证四个人声的复用，以及叠加语音中两句已知文本的关键词是否分别保留。该小样本不代表总体准确率；中文重叠样本仍可出现明显识别错误，不将“两路输出颜色不同”当作分离或翻译准确的证据。音频、报告和截图均只保留在忽略的 `.cache` 中。

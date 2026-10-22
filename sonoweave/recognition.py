@@ -99,7 +99,7 @@ def configure_cuda():
                 pass
 
 
-def load_recognizer():
+def load_recognizer(device=None, cpu_threads=None):
     from faster_whisper import WhisperModel
     import ctranslate2
 
@@ -107,7 +107,7 @@ def load_recognizer():
     if not (Path(path) / "model.bin").is_file():
         raise RuntimeError("缺少离线语音模型，请重新启动以下载，或运行 tools/prepare_models.py")
     configure_cuda()
-    device = os.environ.get("SONOWEAVE_ASR_DEVICE", "auto")
+    device = device or os.environ.get("SONOWEAVE_ASR_DEVICE", "auto")
     if device != "cpu" and ctranslate2.get_cuda_device_count() > 0:
         try:
             model = WhisperModel(path, device="cuda", compute_type="float16", local_files_only=True)
@@ -118,6 +118,6 @@ def load_recognizer():
         except Exception:
             log.warning("CUDA recognition unavailable; falling back to CPU")
     model = WhisperModel(path, device="cpu", compute_type="int8", local_files_only=True,
-                         cpu_threads=min(6, max(2, (os.cpu_count() or 4) // 2)))
+                         cpu_threads=cpu_threads or min(6, max(2, (os.cpu_count() or 4) // 2)))
     log.info("Offline recognition ready: Whisper %s, CPU int8", Path(path).name)
     return model

@@ -26,6 +26,8 @@ import sys
 assert sys.version_info[:2] == (3, 12)
 from PySide6.QtWidgets import QApplication
 from faster_whisper import WhisperModel
+from sherpa_onnx import OfflineSpeakerDiarization, SpeakerEmbeddingExtractor
+from onnxruntime import InferenceSession
 from llama_cpp import Llama, llama_supports_gpu_offload
 from numpy import asarray
 from requests import Session

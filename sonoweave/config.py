@@ -62,6 +62,10 @@ def model_location() -> str:
     return str(_model_path(Path("small")))
 
 
+def speaker_model_location(filename: str) -> Path:
+    return _model_path(Path("speakers") / filename)
+
+
 def translation_model_location(model: str | None = None) -> Path:
     configured = os.environ.get("SONOWEAVE_TRANSLATE_MODEL")
     if configured and model is None:
@@ -75,29 +79,56 @@ class Settings:
         self.path = path if path is not None else data_dir() / "settings.json"
         self.target = "zh-CN"
         self.model = "4b"
+        self.speaker_colors = False
+        self.font_size = 23
+        self.caption_lines = 4
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
             if isinstance(value, dict) and value.get("target") in LANGUAGES:
                 self.target = value["target"]
             if isinstance(value, dict) and value.get("model") in TRANSLATION_MODELS:
                 self.model = value["model"]
+            if isinstance(value, dict):
+                if type(value.get("speaker_colors")) is bool:
+                    self.speaker_colors = value["speaker_colors"]
+                for key, lower, upper in (("font_size", 12, 48), ("caption_lines", 1, 10)):
+                    number = value.get(key)
+                    if type(number) is int and lower <= number <= upper:
+                        setattr(self, key, number)
         except (OSError, ValueError, TypeError):
             pass
 
     def save_target(self, target: str) -> None:
         if target not in LANGUAGES:
             raise ValueError("Unsupported target language")
-        self._save(target, self.model)
-        self.target = target
+        self._save(target=target)
 
     def save_model(self, model: str) -> None:
         if model not in TRANSLATION_MODELS:
             raise ValueError("Unsupported translation model")
-        self._save(self.target, model)
-        self.model = model
+        self._save(model=model)
 
-    def _save(self, target, model):
+    def save_speaker_colors(self, enabled: bool) -> None:
+        if type(enabled) is not bool:
+            raise ValueError("Speaker colors must be a boolean")
+        self._save(speaker_colors=enabled)
+
+    def save_font_size(self, size: int) -> None:
+        if type(size) is not int or not 12 <= size <= 48:
+            raise ValueError("Font size must be between 12 and 48 points")
+        self._save(font_size=size)
+
+    def save_caption_lines(self, lines: int) -> None:
+        if type(lines) is not int or not 1 <= lines <= 10:
+            raise ValueError("Caption lines must be between 1 and 10")
+        self._save(caption_lines=lines)
+
+    def _save(self, **changes):
+        value = {key: getattr(self, key) for key in ("target", "model", "speaker_colors", "font_size", "caption_lines")}
+        value.update(changes)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"target": target, "model": model}, ensure_ascii=False), encoding="utf-8")
+        temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
         temporary.replace(self.path)
+        for key, item in changes.items():
+            setattr(self, key, item)

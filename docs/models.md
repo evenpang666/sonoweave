@@ -3,8 +3,13 @@
 | 用途 | 模型 | 模型文件体积 | 推理方式 |
 | --- | --- | --- | --- |
 | 语音识别 | Whisper small 多语言版 | 约 486 MB，含分词文件 | faster-whisper / CTranslate2；CUDA FP16，或 CPU int8 |
+| 人声分段 | pyannote segmentation 3.0，ONNX int8 | 约 1.54 MB | sherpa-onnx，CPU 单线程 |
+| 人声特征 | 3D-Speaker CAMPPlus，中英文 advanced 版 | 约 28.28 MB | sherpa-onnx，CPU 单线程 |
+| 双人重叠分离 | Conv-TasNet，Libri2Mix sepclean 16 kHz ONNX | 约 20.15 MB | ONNX Runtime，CPU 单线程；仅重叠时推理 |
 | 翻译与上下文修订 | Qwen3.5-4B，Q4_K_M | 2,740,937,888 字节，约 2.55 GiB | llama.cpp；Vulkan GPU 或 CPU，关闭思考模式 |
 | 可选快速翻译 | Qwen3.5-2B，Q4_K_M | 1,280,835,840 字节，约 1.19 GiB | 同上；占用更低，速度优先，准确性可能下降 |
+
+人声配色默认关闭；人声分段、特征与分离模型仅在开启时准备，额外下载约 50 MB；分离器及第二个 CPU Whisper 实例仅在检测到重叠时加载。
 
 0.5.0 保留 Whisper small 识别，默认使用 4B 翻译，并提供 2B 切换。此前连续原文对照中，4B 的事实保留和指代更可靠，因此保留为默认；2B 翻译文件小约 1.46 GB，适合更看重速度和资源占用的用户。两者都只使用语言模型，不下载视觉投影模型。[Qwen 官方模型说明](https://huggingface.co/Qwen/Qwen3.5-4B)及[使用的量化权重](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF)可供检查；下载固定版本并校验 SHA-256，支持断点续传、自动重试，失败后可右键重试。已有有效文件直接复用，无需联网检查更新。模型仍可能错译俚语、专业词、复杂否定或未说完的句子。
 

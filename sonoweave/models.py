@@ -10,7 +10,7 @@ import time
 import requests
 from filelock import FileLock, Timeout
 
-from .config import TRANSLATION_MODELS, model_location, translation_model_location
+from .config import TRANSLATION_MODELS, model_location, speaker_model_location, translation_model_location
 
 
 class DownloadCancelled(Exception):
@@ -34,6 +34,23 @@ ASR_FILES = (
     ("tokenizer.json", 2203239, "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"),
     ("vocabulary.txt", 459861, "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"),
 )
+
+SPEAKER_FILES = (
+    ModelFile("csukuangfj/sherpa-onnx-pyannote-segmentation-3-0", "9403a6902bb58e3d5ae8c7e77c3422de279db2e0",
+              "model.int8.onnx", 1540506, "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d"),
+    ModelFile("csukuangfj/speaker-embedding-models", "0743f301363dec56491a490f6d6cbc9d67f9a3bf",
+              "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx", 28281164,
+              "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2"),
+)
+
+SEPARATION_FILE = ModelFile("welcomyou/convtasnet-libri2mix-16k-onnx", "da50e0fa7789356790994bc898290134fef5d42d",
+                           "convtasnet_16k.onnx", 20154131,
+                           "22185d8e13bf5251c0eeab09e52099ac76c063cd9a5e5df1f5c242f535f6f151")
+
+
+def ensure_speaker_models(progress=lambda text: None, cancelled=lambda: False):
+    for spec in (*SPEAKER_FILES, SEPARATION_FILE):
+        ensure_file(speaker_model_location(spec.filename), spec, progress, cancelled)
 
 
 def _check_cancel(cancelled):
@@ -127,7 +144,7 @@ def ensure_file(path: Path, spec: ModelFile, progress=lambda text: None, cancell
         lock.release()
 
 
-def ensure_models(model="4b", progress=lambda text: None, cancelled=lambda: False):
+def ensure_models(model="4b", progress=lambda text: None, cancelled=lambda: False, *, speaker_colors=False):
     spec = TRANSLATION_MODELS[model]
     asr = Path(model_location())
     if os.environ.get("SONOWEAVE_MODEL"):
@@ -136,6 +153,8 @@ def ensure_models(model="4b", progress=lambda text: None, cancelled=lambda: Fals
     else:
         for name, size, sha in ASR_FILES:
             ensure_file(asr / name, ModelFile(ASR_REPO, ASR_REVISION, name, size, sha), progress, cancelled)
+    if speaker_colors:
+        ensure_speaker_models(progress, cancelled)
     path = translation_model_location(model)
     ensure_file(path, ModelFile(spec["repo"], spec["revision"], spec["filename"], spec["bytes"], spec["sha256"]), progress, cancelled)
     return path

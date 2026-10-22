@@ -54,6 +54,7 @@ def main() -> int:
             self.generation = 0
             self.cancel_download = threading.Event()
             self.closing = False
+            self.retiring_engine = None
             self.preparation_lock = threading.Lock()
             self.engine_status = ("正在加载离线识别与翻译模型…", False)
             self.preparation_status.connect(self.receive_preparation_status)
@@ -78,18 +79,27 @@ def main() -> int:
                 self.engine.translation_status.disconnect(self.receive_translation_status)
                 window.target_changed.disconnect(self.engine.set_target)
                 self.engine = None
+                self.retiring_engine = old
             self.prepare(old)
 
         @Slot(str)
         def switch_model(self, model):
             self.prepare()
 
+        @Slot(bool)
+        def switch_speaker_colors(self, enabled):
+            if self.engine and not enabled:
+                self.engine.set_speaker_colors(False)
+            self.prepare()
+
         def prepare(self, old=None):
+            old = self.retiring_engine or old
             self.generation += 1
             generation = self.generation
             self.cancel_download.set()
             cancel = self.cancel_download = threading.Event()
             selected = settings.model
+            speaker_colors = settings.speaker_colors
             window.set_translation_status("")
             window.set_status(f"正在准备 {selected.upper()} 离线模型…")
 
@@ -102,9 +112,11 @@ def main() -> int:
                                 if cancel.is_set():
                                     raise DownloadCancelled
                                 raise RuntimeError("旧任务仍未退出，请关闭声屿后重新启动")
+                            if self.retiring_engine is old:
+                                self.retiring_engine = None
                         path = ensure_models(selected,
                             progress=lambda text: self.preparation_status.emit(generation, text),
-                            cancelled=cancel.is_set)
+                            cancelled=cancel.is_set, speaker_colors=speaker_colors)
                     if not cancel.is_set():
                         self.preparation_finished.emit(generation, str(path), "")
                 except DownloadCancelled:
@@ -131,9 +143,10 @@ def main() -> int:
             if self.engine:
                 window.set_status(*self.engine_status)
                 self.engine.set_model(path)
+                self.engine.set_speaker_colors(settings.speaker_colors)
                 return
             from sonoweave.engine import CaptionEngine
-            self.engine = CaptionEngine(settings.target, model_path=path)
+            self.engine = CaptionEngine(settings.target, model_path=path, speaker_colors=settings.speaker_colors)
             self.engine.caption.connect(self.receive_caption)
             self.engine.status.connect(self.receive_status)
             self.engine.translation_status.connect(self.receive_translation_status)
@@ -144,7 +157,7 @@ def main() -> int:
         @Slot(object)
         def receive_caption(self, update):
             if self.sender() is self.engine and update.revision == self.engine.revision:
-                window.set_caption(update.text, update.final)
+                window.set_caption(update.text, update.final, update.runs)
 
         @Slot(str, bool)
         def receive_status(self, text, error):
@@ -170,6 +183,7 @@ def main() -> int:
     controller = Controller()
     window.retry_requested.connect(controller.start)
     window.model_changed.connect(controller.switch_model)
+    window.speaker_colors_changed.connect(controller.switch_speaker_colors)
     window.show()
     if args.preview or args.screenshot:
         window.set_status("正在聆听系统声音 · 离线")

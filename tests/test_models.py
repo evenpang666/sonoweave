@@ -115,9 +115,21 @@ def test_preparation_downloads_only_selected_translation_model(tmp_path, monkeyp
     monkeypatch.setattr("sonoweave.models.ensure_file", lambda path, spec, *args: calls.append((path, spec)))
     result = ensure_models("2b")
     assert len(calls) == 5
+    assert all(path.parent.name != "speakers" for path, _ in calls)
     assert calls[-1][1].filename == "Qwen3.5-2B-Q4_K_M.gguf"
     assert result == translation_model_location("2b")
     assert all("4B" not in spec.filename for _, spec in calls)
+
+
+def test_speaker_models_are_only_prepared_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("SONOWEAVE_MODELS_DIR", str(tmp_path))
+    monkeypatch.delenv("SONOWEAVE_MODEL", raising=False)
+    calls = []
+    monkeypatch.setattr("sonoweave.models.ensure_file", lambda path, spec, *args: calls.append((path, spec)))
+    ensure_models("2b", speaker_colors=True)
+    assert len(calls) == 8
+    assert [spec.filename for _, spec in calls[4:7]] == [
+        "model.int8.onnx", "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx", "convtasnet_16k.onnx"]
 
 
 def test_frozen_download_directory_is_writable_user_data(tmp_path, monkeypatch):
