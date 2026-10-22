@@ -26,6 +26,8 @@ from PySide6.QtCore import QCoreApplication
 from faster_whisper.audio import decode_audio
 import sonoweave.engine as implementation
 from sonoweave.audio import FRAME_SAMPLES, SAMPLE_RATE, StreamingSegmenter
+from sonoweave import __version__
+from sonoweave.config import model_location, translation_model_location
 from sonoweave.recognition import load_recognizer
 from sonoweave.translation import Translator
 
@@ -36,7 +38,10 @@ def no_network(*args, **kwargs):
 
 def main():
     app = QCoreApplication([])
-    report = {"network_blocked": True, "input": "jfk.flac, paced at original speed; no speaker playback", "updates": []}
+    report = {"version": __version__, "asr_model": Path(model_location()).name,
+              "translation_model": translation_model_location().name,
+              "real_system_audio": False, "network_blocked": True,
+              "input": "jfk.flac, paced at original speed; no speaker playback", "updates": []}
     with patch.object(socket.socket, "connect", no_network), patch.object(socket, "create_connection", no_network):
         load_start = time.monotonic()
         model = load_recognizer()
@@ -110,7 +115,9 @@ def main():
         report["median_processing_lag_seconds"] = round(statistics.median(row["lag_seconds"] for row in report["updates"]), 3)
         report.pop("stream_started", None)
     name = "streaming-cpu.json" if "--cpu" in sys.argv else "streaming-gpu.json"
-    (ROOT / "artifacts" / name).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    output = Path(sys.argv[sys.argv.index("--output") + 1]) if "--output" in sys.argv else ROOT / "artifacts" / name
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({key: value for key, value in report.items() if key != "updates"}), flush=True)
 
 

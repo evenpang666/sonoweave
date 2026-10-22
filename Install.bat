@@ -13,7 +13,8 @@ if not exist ".venv\Scripts\python.exe" goto failed
 if errorlevel 1 goto failed
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto failed
-echo Installation complete. Run PrepareModels.bat once, then Start.bat.
+echo Installation complete. Run Start.bat; missing models download automatically on first use.
+echo Optional: run PrepareModels.bat --model both to pre-download both translation models.
 pause
 exit /b 0
 :failed

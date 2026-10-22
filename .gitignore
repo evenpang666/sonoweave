@@ -1,10 +1,33 @@
+# Local environments and caches
 .venv/
+venv/
 .cache/
 .runtime/
 __pycache__/
+*.py[cod]
 .pytest_cache/
-build/
-dist/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Downloaded model weights
 models/
+*.gguf
+*.gguf.part
+
+# Build output
+/build/
+/dist/
 *.spec
+*.egg-info/
+
+# Generated reports, screenshots and local validation archives
+/artifacts/
+/docs/archive/verification/
+/requirements-installed.txt
 *.log
+*.part
+*.download

@@ -3,6 +3,7 @@ soundcard>=0.4.3,<0.5
 faster-whisper>=1.1,<2
 numpy>=1.26,<3
 requests>=2.32,<3
+filelock>=3.16,<4
 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/vulkan
 --only-binary=llama-cpp-python
 llama-cpp-python==0.3.36

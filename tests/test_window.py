@@ -41,6 +41,17 @@ def test_translation_failure_does_not_hide_capture_error(app, tmp_path):
     assert window.status_label.text() == "正在聆听系统声音"
 
 
+def test_model_choice_is_persisted_and_signalled_without_changing_target(app, tmp_path):
+    window = CaptionWindow(Settings(tmp_path / "settings.json"))
+    models = []
+    window.model_changed.connect(models.append)
+    window.choose_model("2b")
+    window.choose_model("2b")
+    assert models == ["2b"]
+    assert Settings(window.settings.path).model == "2b"
+    assert window.settings.target == "zh-CN"
+
+
 def test_visible_tail_keeps_recent_lines_without_changing_the_source_text(app):
     text = "First\nSecond\nThird\nFourth\nFifth"
     assert caption_tail(text, QFont("Segoe UI", 14), 600, max_lines=2) == "…Fourth\nFifth"

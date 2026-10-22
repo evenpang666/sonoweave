@@ -6,7 +6,7 @@ if not exist ".venv\Scripts\python.exe" (
     pause
     exit /b 1
 )
-".venv\Scripts\python.exe" "tools\prepare_models.py"
+".venv\Scripts\python.exe" "tools\prepare_models.py" %*
 if errorlevel 1 (
     echo Model preparation failed. Check your network, then run this again.
     pause

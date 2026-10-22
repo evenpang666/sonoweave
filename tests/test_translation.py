@@ -1,7 +1,7 @@
 from unittest.mock import Mock
 
 import pytest
-from sonoweave.translation import TranslationCancelled, TranslationError, Translator, UntranslatedOutput, build_prompt, build_retry_prompt
+from sonoweave.translation import TranslationCancelled, TranslationError, Translator, UntranslatedOutput, build_prompt, build_retry_prompt, translation_units, function_fragment
 
 
 def translator_with(text="译文"):
@@ -22,12 +22,13 @@ def test_cache_includes_context_and_language():
 
 def test_prompt_distinguishes_context_from_current_and_disables_thinking():
     prompt = build_prompt("He stood on the bank.", "zh-CN", ("They were fishing.",))
-    assert "Simplified Chinese" in prompt
-    assert '"preceding_source_context": ["They were fishing."]' in prompt
-    assert '"current_source": "He stood on the bank."' in prompt
+    assert "简体中文" in prompt
+    assert '以下前文仅供消解指代，不得翻译或复述：["They were fishing."]' in prompt
+    assert '<|im_start|>user\nHe stood on the bank.' in prompt
     assert prompt.endswith("<think>\n\n</think>\n\n")
     assert prompt.count("<|im_start|>user") == 1
-    assert '"current_source": "But I"' not in prompt
+    assert "But I" not in prompt
+    assert "/no_think" not in prompt
 
 
 def test_reserved_control_tokens_cannot_change_prompt_roles():
@@ -38,6 +39,13 @@ def test_reserved_control_tokens_cannot_change_prompt_roles():
 def test_retry_quotes_source_to_separate_it_from_instructions():
     prompt = build_retry_prompt('going to say "hello"', "zh-CN")
     assert '<|im_start|>user\n"going to say \\"hello\\""' in prompt
+
+
+def test_isolated_subtitle_uses_direct_translation_without_a_reference_payload():
+    prompt = build_prompt("They performed very well.", "zh-CN")
+    assert "Simplified Chinese" in prompt
+    assert '<|im_start|>user\nThey performed very well.<|im_end|>' in prompt
+    assert "/no_think" not in prompt
 
 
 def test_matching_language_skips_model_but_chinese_script_does_not():
@@ -174,3 +182,72 @@ def test_repeated_collapsed_translation_is_not_cached():
     with pytest.raises(UntranslatedOutput):
         translator.translate("This source contains more than twenty ordinary English words and several clauses which should never be reduced to an unrelated short answer.", "zh-CN", "en")
     assert not translator.cache
+
+
+def test_sentence_cache_reuses_stable_prefix_of_a_growing_audio_window():
+    translator, llm = translator_with()
+    llm.create_completion.side_effect = [
+        [{"choices": [{"text": "第一句。"}]}],
+        [{"choices": [{"text": "接下来"}]}],
+        [{"choices": [{"text": "下一句话已完成。"}]}],
+    ]
+    assert translator.translate("First sentence. The next", "zh-CN", "en") == "第一句。 接下来"
+    assert translator.translate("First sentence. The next sentence is complete.", "zh-CN", "en") == "第一句。 下一句话已完成。"
+    assert llm.create_completion.call_count == 3
+
+
+def test_validated_sentences_are_published_even_when_a_later_sentence_fails():
+    translator, llm = translator_with()
+    llm.create_completion.side_effect = [[{"choices": [{"text": "已完成的第一句。"}]}], RuntimeError("tail failed")]
+    progress = []
+    with pytest.raises(TranslationError):
+        translator.translate("The first sentence. The failing second sentence.", "zh-CN", "en", on_progress=progress.append)
+    assert progress == ["已完成的第一句。"]
+
+
+def test_latest_segment_is_processed_first_and_result_stays_aligned():
+    translator, llm = translator_with()
+    llm.create_completion.side_effect = [
+        [{"choices": [{"text": "最新的句子。"}]}],
+        [{"choices": [{"text": "前一句。"}]}],
+    ]
+    progress = []
+    result = translator.translate_segments(("Earlier sentence.", "Newest sentence."), "zh-CN", "en",
+                                           prioritize_latest=True, on_progress=lambda index, text: progress.append((index, text)))
+    assert result == ("前一句。", "最新的句子。")
+    assert progress[0] == (1, "最新的句子。")
+    assert '以下前文仅供消解指代，不得翻译或复述：["Earlier sentence."]' in llm.create_completion.call_args_list[0].kwargs["prompt"]
+
+
+def test_sentence_boundaries_preserve_names_numbers_and_all_source_characters():
+    text = "Dr. Lee met Mr. Smith at 3.5 p.m. They left. 下一句话。还有草稿"
+    units = translation_units(text)
+    assert units[0].startswith("Dr. Lee met Mr. Smith at 3.5")
+    assert "".join("".join(units).split()) == "".join(text.split())
+    assert units[-2:] == ("下一句话。", "还有草稿")
+
+
+def test_token_limit_cannot_publish_a_truncated_translation_as_complete():
+    translator, llm = translator_with()
+    llm.create_completion.return_value = [{"choices": [{"text": "句子被截断", "finish_reason": "length"}]}]
+    with pytest.raises(TranslationError):
+        translator.translate("This sentence must be complete.", "zh-CN", "en")
+    assert not translator.cache
+
+
+def test_incomplete_fragment_cannot_drop_its_subject():
+    translator, llm = translator_with("但是")
+    assert translator.translate("But I", "zh-CN", "en") == "但我"
+    llm.create_completion.assert_not_called()
+    with pytest.raises(UntranslatedOutput):
+        translator._check_translation("But I", "但是", "zh-CN", "en")
+
+
+def test_literal_fragment_rule_does_not_replace_complete_clauses_or_other_languages():
+    assert function_fragment("Because we", "zh-TW", "en") == "因為我們"
+    assert function_fragment("You and I", "zh-CN", "en") == "你和我"
+    assert function_fragment("But I know", "zh-CN", "en") is None
+    assert function_fragment("The model runs", "zh-CN", "en") is None
+    assert function_fragment("But I", "ja", "en") is None
+    assert function_fragment("But I 2026", "zh-CN", "en") is None
+    assert function_fragment("But I?", "zh-CN", "en") == "但我？"

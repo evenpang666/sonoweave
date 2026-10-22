@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, Signal
 
 from .audio import capture_loopback
 from .config import LANGUAGES
-from .recognition import load_recognizer
+from .recognition import AdaptiveDecoding, LanguageTracker, load_recognizer
 from .streaming import CaptionUpdate, LatestQueue, SourceChunk, TextJob, TranscriptCache, TranslationCache
 from .translation import TranslationCancelled, TranslationError, Translator, UntranslatedOutput
 
@@ -22,9 +22,11 @@ class CaptionEngine(QObject):
     status = Signal(str, bool)
     translation_status = Signal(str, bool, int)
 
-    def __init__(self, target):
+    def __init__(self, target, model_path=None):
         super().__init__()
         self.target = target
+        self.model_path = model_path
+        self.model_generation = 0
         self.revision = 0
         self.stop_event = threading.Event()
         self.audio_queue = LatestQueue(maxsize=3)
@@ -33,6 +35,7 @@ class CaptionEngine(QObject):
         self.translation_cache = TranslationCache()
         self.lock = threading.Lock()
         self.last_job = None
+        self.last_published = None
         self.threads = []
         self.ready = set()
         self.errors = {}
@@ -66,6 +69,22 @@ class CaptionEngine(QObject):
         capture_loopback(self.stop_event, self._enqueue_audio,
                          lambda text, error: self._component_status("audio", text, error))
 
+    def set_model(self, model_path):
+        with self.lock:
+            if self.model_path == model_path:
+                return
+            self.model_path = model_path
+            self.model_generation += 1
+            self.revision += 1
+            self.ready.discard("translation")
+            self.errors.pop("translation", None)
+            self.text_queue.clear()
+            self.translation_cache.clear()
+            if self.last_job:
+                self.last_job = replace(self.last_job, target=self.target, revision=self.revision)
+                self.text_queue.put("recent-transcript", self.last_job)
+        self.status.emit("正在切换离线翻译模型…", False)
+
     def _component_status(self, name, text="", error=False):
         with self.lock:
             if error:
@@ -92,8 +111,8 @@ class CaptionEngine(QObject):
         if self.stop_event.is_set():
             return
         self._component_status("recognition")
-        language = None
-        utterance_id = None
+        language_tracker = LanguageTracker()
+        decoding = AdaptiveDecoding()
         while not self.stop_event.is_set():
             try:
                 window = self.audio_queue.get()
@@ -101,22 +120,29 @@ class CaptionEngine(QObject):
                 continue
             if not window.final and time.monotonic() - window.ended > 4:
                 continue
-            if window.utterance_id != utterance_id:
-                utterance_id, language = window.utterance_id, None
+            language_tracker.begin(window)
             try:
+                if language_tracker.should_probe(window):
+                    detected, probability, _ = model.detect_language(audio=window.audio[-128000:])
+                    language_tracker.observe(detected, probability, window)
+                language = language_tracker.language
                 segments, info = model.transcribe(
-                    window.audio, beam_size=1, language=language, vad_filter=True,
+                    window.audio, beam_size=decoding.beam(window), language=language, vad_filter=True,
                     vad_parameters={"min_silence_duration_ms": 200, "speech_pad_ms": 100},
                     condition_on_previous_text=False, temperature=0,
                     max_new_tokens=160, without_timestamps=True,
                 )
-                parts = [segment.text.strip() for segment in segments if segment.no_speech_prob < 0.6]
+                # faster-whisper already combines no-speech probability with
+                # decoder confidence. A second probability-only filter drops
+                # valid speech it deliberately retained, leaving captions stale.
+                parts = [segment.text.strip() for segment in segments]
                 text = " ".join(part for part in parts if part).strip()
+                decoding.observe(text, window)
                 if not text or self.stop_event.is_set():
                     continue
-                if language is None and getattr(info, "language_probability", 1) >= 0.65:
-                    language = info.language
-                source = language or info.language
+                if language is None:
+                    language_tracker.observe(info.language, getattr(info, "language_probability", 0), window)
+                source = info.language
                 with self.lock:
                     chunk = SourceChunk(window.utterance_id, text, source, window.sequence,
                                         window.final, window.started, window.ended)
@@ -138,52 +164,71 @@ class CaptionEngine(QObject):
         self.audio_queue.put(window.utterance_id, window)
 
     def _translate(self):
+        while not self.stop_event.is_set():
+            with self.lock:
+                path, generation = self.model_path, self.model_generation
+            self._translate_once(path, generation)
+            # A load failure can be recovered by selecting another model.
+            while generation == self.model_generation and not self.stop_event.wait(0.2):
+                pass
+
+    def _translate_once(self, path, generation):
+        translator = None
         try:
-            translator = Translator()
+            translator = Translator(model_path=path) if path is not None else Translator()
             translator.warmup()
         except TranslationError as exc:
+            if translator is not None:
+                translator.close()
             log.exception("Offline translation initialization failed")
-            self._component_status("translation", str(exc), True)
+            if generation == self.model_generation:
+                self._component_status("translation", str(exc), True)
             return
-        self._component_status("translation")
+        if generation == self.model_generation and not self.stop_event.is_set():
+            self._component_status("translation")
         delivered = (-1, -1, -1)
         try:
-            while not self.stop_event.is_set():
+            while not self.stop_event.is_set() and generation == self.model_generation:
                 try:
                     job = self.text_queue.get()
                 except Empty:
                     continue
+                if generation != self.model_generation:
+                    # The old worker may have been waiting in get() when the
+                    # new model's job arrived. Preserve the latest snapshot.
+                    with self.lock:
+                        if self.last_job:
+                            self.text_queue.put("recent-transcript", self.last_job)
+                    break
                 if job.revision != self.revision:
                     continue
                 try:
-                    cancelled = lambda: self.stop_event.is_set() or job.revision != self.revision
+                    def cancelled():
+                        latest = self.last_job
+                        return (self.stop_event.is_set() or generation != self.model_generation or job.revision != self.revision or
+                                (latest is not None and latest.utterance_id > job.utterance_id and
+                                 latest.ended - job.ended > 1.5))
                     if job.segments:
+                        def progress(index, text):
+                            if not cancelled():
+                                self._publish(job, (job.segments[index],), (text,), complete=False)
+
                         translations = translator.translate_segments(
                             tuple(part.text for part in job.segments), job.target, job.source,
                             context=job.context, should_cancel=cancelled,
+                            on_progress=progress, prioritize_latest=True,
                         )
                     else:
                         translations = (translator.translate(job.text, job.target, job.source,
                                                               context=job.context, should_cancel=cancelled),)
                     order = (job.revision, job.utterance_id, job.sequence)
-                    with self.lock:
-                        if cancelled() or order <= delivered:
-                            continue
-                        segments = job.segments or (SourceChunk(job.utterance_id, job.text, job.source,
-                                                               job.sequence, job.final, job.started, job.ended),)
-                        retained = {part.utterance_id for part in self.source_cache.snapshot()} or {part.utterance_id for part in segments}
-                        self.translation_cache.update(segments, translations, retained)
-                        text = self.translation_cache.tail()
-                        delivered = order
-                        now = time.monotonic()
-                        update = CaptionUpdate(text, job.revision, job.utterance_id, job.sequence, job.final,
-                                               max(0, now - job.ended), max(0, now - job.started),
-                                               self.source_cache.char_count, self.translation_cache.char_count,
-                                               len(self.translation_cache.chunks))
+                    if cancelled() or order <= delivered:
+                        continue
+                    segments = job.segments or (SourceChunk(job.utterance_id, job.text, job.source,
+                                                           job.sequence, job.final, job.started, job.ended),)
+                    self._publish(job, segments, translations, complete=True)
+                    delivered = order
                     self.translation_status.emit("", False, job.revision)
-                    self.caption.emit(update)
-                    log.info("Caption cache: source=%d translated=%d segments=%d lag=%.3fs",
-                             update.source_chars, update.translation_chars, update.translated_segments, update.lag_seconds)
                 except TranslationCancelled:
                     continue
                 except UntranslatedOutput as exc:
@@ -195,3 +240,30 @@ class CaptionEngine(QObject):
                         self.translation_status.emit(str(exc), True, job.revision)
         finally:
             translator.close()
+
+    def _publish(self, job, segments, translations, complete):
+        """Publish validated sentences without waiting for a whole rolling window."""
+        with self.lock:
+            if self.stop_event.is_set() or job.revision != self.revision:
+                return
+            if not complete:
+                existing = dict(self.translation_cache.snapshot())
+                # Do not roll a previously displayed paragraph back to its first
+                # sentence while its changed tail is still being translated.
+                if all(len(existing.get(segment.utterance_id, "")) >= len(text)
+                       for segment, text in zip(segments, translations)):
+                    return
+            retained = {part.utterance_id for part in self.source_cache.snapshot()} or {part.utterance_id for part in segments}
+            self.translation_cache.update(segments, translations, retained)
+            now = time.monotonic()
+            update = CaptionUpdate(self.translation_cache.tail(), job.revision, job.utterance_id,
+                                   job.sequence, job.final and complete, max(0, now - job.ended),
+                                   max(0, now - job.started), self.source_cache.char_count,
+                                   self.translation_cache.char_count, len(self.translation_cache.chunks))
+            signature = (update.text, update.revision, update.final)
+            if signature == self.last_published:
+                return
+            self.last_published = signature
+        self.caption.emit(update)
+        log.info("Caption cache: source=%d translated=%d segments=%d lag=%.3fs",
+                 update.source_chars, update.translation_chars, update.translated_segments, update.lag_seconds)

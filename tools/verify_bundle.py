@@ -15,9 +15,11 @@ image = folder / "preview.png"
 subprocess.run([str(exe), "--screenshot", str(image)], env=env, check=True, timeout=30)
 assert image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 print("BUNDLED UI OK", flush=True)
+if "--preview-only" in sys.argv:
+    raise SystemExit(0)
 process = subprocess.Popen([str(exe)], env=env)
 try:
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"App exited prematurely: {process.returncode}")

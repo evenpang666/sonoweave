@@ -15,6 +15,8 @@ import sys
 import time
 from unittest.mock import patch
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ.update(QT_QPA_PLATFORM="offscreen", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1",
@@ -22,8 +24,10 @@ os.environ.update(QT_QPA_PLATFORM="offscreen", HF_HUB_OFFLINE="1", TRANSFORMERS_
 
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication
-from sonoweave.config import Settings
+from sonoweave import __version__
+from sonoweave.config import Settings, translation_model_location
 from sonoweave.engine import CaptionEngine
+import sonoweave.engine as implementation
 from sonoweave.window import CaptionWindow
 
 
@@ -35,6 +39,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seconds", type=float, default=90)
     parser.add_argument("--label", default="live")
+    parser.add_argument("--model", choices=("4b", "2b"), default="4b")
     args = parser.parse_args()
     app = QApplication([])
     if not QFontDatabase.families():
@@ -43,14 +48,48 @@ def main():
             QFontDatabase.addApplicationFont(str(fonts / name))
     window = CaptionWindow(Settings(ROOT / ".cache" / "live-test-settings.json"))
     window.show()
-    engine = CaptionEngine("zh-CN")
+    model_path = translation_model_location(args.model)
+    engine = CaptionEngine("zh-CN", model_path=str(model_path))
     started = time.monotonic()
     ready_at = None
     updates = []
     statuses = []
     translation_errors = []
     history = []
-    report = {"real_system_audio": True, "network_blocked": True, "audio_saved": False}
+    audio_windows, asr_events = [], []
+    report = {"version": __version__, "translation_model": model_path.name, "asr_model": "Whisper small",
+              "real_system_audio": True, "network_blocked": True, "audio_saved": False}
+    enqueue = engine._enqueue_audio
+
+    def observed_audio(window):
+        audio_windows.append(dict(at=round(time.monotonic() - started, 3),
+                                  utterance_id=window.utterance_id, sequence=window.sequence, final=window.final,
+                                  rms=round(float(np.sqrt(np.mean(np.square(window.audio)))), 6)))
+        enqueue(window)
+
+    engine._enqueue_audio = observed_audio
+    load_recognizer = implementation.load_recognizer
+
+    def observed_recognizer():
+        model = load_recognizer()
+        transcribe = model.transcribe
+
+        def observed_transcribe(audio, **kwargs):
+            before = time.monotonic()
+            segments, info = transcribe(audio, **kwargs)
+
+            def observed_segments():
+                chars = 0
+                for segment in segments:
+                    chars += len(segment.text.strip())
+                    yield segment
+                asr_events.append(dict(at=round(time.monotonic() - started, 3),
+                                       seconds=round(time.monotonic() - before, 3),
+                                       beam=kwargs.get("beam_size"), chars=chars,
+                                       audio_seconds=round(len(audio) / 16000, 3)))
+            return observed_segments(), info
+        model.transcribe = observed_transcribe
+        return model
 
     def status(text, error):
         nonlocal ready_at
@@ -65,6 +104,7 @@ def main():
         window.set_caption(update.text, update.final)
         row = asdict(update)
         row["at"] = round(time.monotonic() - started, 3)
+        row["visible_change"] = not updates or row["text"] != updates[-1]["text"]
         with engine.lock:
             row["source_snapshot"] = [asdict(chunk) for chunk in engine.source_cache.snapshot()[-3:]]
         updates.append(row)
@@ -82,7 +122,8 @@ def main():
                                            at=round(time.monotonic() - started, 3)))
 
     engine.translation_status.connect(translation_status)
-    with patch.object(socket.socket, "connect", no_network), patch.object(socket, "create_connection", no_network):
+    with patch.object(socket.socket, "connect", no_network), patch.object(socket, "create_connection", no_network), \
+         patch.object(implementation, "load_recognizer", observed_recognizer):
         engine.start()
         deadline = started + args.seconds + 60
         last_sample = started
@@ -95,6 +136,7 @@ def main():
                         history.append(dict(at=round(now - started, 3), source_chars=engine.source_cache.char_count,
                                             source_segments=len(engine.source_cache.chunks),
                                             source_version=engine.source_cache.version, update_count=len(updates),
+                                            visible_update_count=sum(row["visible_change"] for row in updates),
                                             translated_chars=engine.translation_cache.char_count,
                                             translated_segments=len(engine.translation_cache.chunks)))
                     last_sample = now
@@ -118,6 +160,8 @@ def main():
     steady = [row["lag_seconds"] for row in updates if ready_at is not None and row["at"] >= ready_at - started + 5]
     steady_updates = [row for row in updates if ready_at is not None and row["at"] >= ready_at - started + 5]
     gaps = [later["at"] - earlier["at"] for earlier, later in zip(steady_updates, steady_updates[1:])]
+    visible_updates = [row for row in steady_updates if row["visible_change"]]
+    visible_gaps = [later["at"] - earlier["at"] for earlier, later in zip(visible_updates, visible_updates[1:])]
     max_stall = 0
     waiting_since = None
     reference_chars = 0
@@ -125,7 +169,7 @@ def main():
     for sample in history:
         if ready_at is None or sample["at"] < ready_at - started + 5:
             continue
-        if previous is None or sample["update_count"] != previous["update_count"]:
+        if previous is None or sample["visible_update_count"] != previous["visible_update_count"]:
             waiting_since = None
             reference_chars = sample["source_chars"]
         elif sample["source_version"] != previous["source_version"] and waiting_since is None:
@@ -142,13 +186,19 @@ def main():
                   p95_steady_processing_lag=round(sorted(steady)[min(len(steady) - 1, int(len(steady) * 0.95))], 3) if steady else None,
                   max_steady_processing_lag=round(max(steady), 3) if steady else None,
                   max_steady_caption_gap_seconds=round(max(gaps), 3) if gaps else None,
+                  visible_update_count=sum(row["visible_change"] for row in updates),
+                  max_steady_visible_gap_seconds=round(max(visible_gaps), 3) if visible_gaps else None,
                   translation_error_count=len(translation_errors),
                   max_stall_with_growing_source_seconds=round(max_stall, 3),
+                  audio_window_count=len(audio_windows),
+                  nonzero_audio_window_count=sum(row["rms"] > 0.0001 for row in audio_windows),
+                  asr_event_count=len(asr_events),
+                  beam3_event_count=sum(row["beam"] == 3 for row in asr_events),
                   statuses=statuses, translation_errors=translation_errors, history=history, updates=updates,
-                  source_cache=sources, translation_cache=translations)
+                  source_cache=sources, translation_cache=translations, audio_windows=audio_windows, asr_events=asr_events)
     (destination / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     summary = {key: value for key, value in report.items() if key not in (
-        "statuses", "translation_errors", "history", "updates", "source_cache", "translation_cache")}
+        "statuses", "translation_errors", "history", "updates", "source_cache", "translation_cache", "audio_windows", "asr_events")}
     print("RESULT", json.dumps(summary), flush=True)
     print("PRIVATE_DIAGNOSTICS", destination, flush=True)
     assert report["source_segments"] >= 3, "Not enough speech received to test cross-sentence caching"

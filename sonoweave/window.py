@@ -4,7 +4,7 @@ from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QActionGroup, QColor, QFont, QPainter, QPen, QTextLayout, QTextOption
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QSizeGrip, QVBoxLayout, QWidget
 
-from .config import LANGUAGES, Settings
+from .config import LANGUAGES, TRANSLATION_MODELS, Settings
 
 
 def caption_tail(text, font, width, max_lines=4):
@@ -35,6 +35,7 @@ def caption_tail(text, font, width, max_lines=4):
 class CaptionWindow(QWidget):
     target_changed = Signal(str)
     retry_requested = Signal()
+    model_changed = Signal(str)
 
     def __init__(self, settings: Settings):
         super().__init__()
@@ -156,6 +157,17 @@ class CaptionWindow(QWidget):
         self.target_changed.emit(code)
         self._refresh_status()
 
+    def choose_model(self, model: str) -> None:
+        if model == self.settings.model:
+            return
+        try:
+            self.settings.save_model(model)
+        except OSError:
+            self.set_status("无法保存模型设置，请检查目录权限", True)
+            return
+        self.set_translation_status("")
+        self.model_changed.emit(model)
+
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
         languages = menu.addMenu("翻译为")
@@ -166,6 +178,14 @@ class CaptionWindow(QWidget):
             action.setChecked(code == self.settings.target)
             group.addAction(action)
             action.triggered.connect(lambda checked=False, target=code: self.choose_language(target))
+        models = menu.addMenu("翻译模型")
+        model_group = QActionGroup(menu)
+        for key, spec in TRANSLATION_MODELS.items():
+            action = models.addAction(spec["label"])
+            action.setCheckable(True)
+            action.setChecked(key == self.settings.model)
+            model_group.addAction(action)
+            action.triggered.connect(lambda checked=False, model=key: self.choose_model(model))
         if self._base_status[1]:
             menu.addSeparator()
             menu.addAction("重新连接", self.retry_requested.emit)

@@ -6,8 +6,9 @@
 - [SoundCard](https://github.com/bastibe/SoundCard)：BSD-3-Clause。
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper)：MIT。
 - [CTranslate2](https://github.com/OpenNMT/CTranslate2)：MIT。
-- [Whisper](https://github.com/openai/whisper)：代码及模型权重为 MIT；附带模型为 [Systran/faster-whisper-base](https://huggingface.co/Systran/faster-whisper-base) 的 CTranslate2 转换版本。
-- [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B)：Apache-2.0；附带 [Unsloth Q4_K_M 量化版](https://huggingface.co/unsloth/Qwen3-1.7B-GGUF)，版本 d7f544eead698dbd1f15126ef60b45a1e1933222。
+- [Whisper](https://github.com/openai/whisper)：代码及模型权重为 MIT；自动下载 [Systran/faster-whisper-small](https://huggingface.co/Systran/faster-whisper-small) 的 CTranslate2 转换版本，版本 536b0662742c02347bc0e980a01041f333bce120。
+- [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)：Apache-2.0；默认下载 [Unsloth Q4_K_M 量化版](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF)，版本 e87f176479d0855a907a41277aca2f8ee7a09523。
+- [Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B)：Apache-2.0；可选下载 [Unsloth Q4_K_M 量化版](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF)，版本 f6d5376be1edb4d416d56da11e5397a961aca8ae。两种模型均仅加载语言权重，不包含视觉投影模型；发布包不附带模型文件。
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) 及 [llama-cpp-python](https://github.com/abetlen/llama-cpp-python)：MIT，Vulkan 后端来自上游预编译轮子；运行时动态加载本机显卡驱动。
 - [NumPy](https://numpy.org/doc/stable/license.html)：BSD-3-Clause。
 - [Requests](https://requests.readthedocs.io/en/latest/community/faq/#what-is-the-license)：Apache-2.0。

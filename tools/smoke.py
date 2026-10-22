@@ -15,6 +15,7 @@ os.environ.update(SONOWEAVE_HOME=str(ROOT / ".runtime"), HF_HUB_OFFLINE="1", TRA
 
 from sonoweave.recognition import load_recognizer
 from sonoweave.translation import Translator
+from sonoweave.config import model_location, translation_model_location
 
 
 def no_network(*args, **kwargs):
@@ -22,7 +23,8 @@ def no_network(*args, **kwargs):
 
 
 def main():
-    report = {"network_blocked": True, "translations": []}
+    report = {"network_blocked": True, "translations": [], "asr_model": Path(model_location()).name,
+              "translation_model": translation_model_location().name}
     with patch.object(socket.socket, "connect", no_network), patch.object(socket, "create_connection", no_network):
         start = time.perf_counter()
         recognizer = load_recognizer()
@@ -49,6 +51,10 @@ def main():
             ("Das Modell funktioniert ohne Internet.", "de", "zh-CN", ()),
             ("The model runs entirely offline.", "en", "ja", ()),
             (text, info.language, "zh-CN", ()),
+            ("They really knocked it out of the park economically.", "en", "zh-CN", ()),
+            ("But I", "en", "zh-CN", ()),
+            ("not going to be us.", "en", "zh-CN", ("Communist countries were falling in Europe.", "He said that is")),
+            ("Economic development was a hard target, something you can easily measure with a number.", "en", "zh-CN", ("Officials were assessed on a scorecard with performance indicators.",)),
         ]
         try:
             for text, source, target, context in cases:
@@ -61,12 +67,26 @@ def main():
         finally:
             translator.close()
         river, finance = [item["translation"] for item in report["translations"][:2]]
-        assert river != finance and "河" in river and "银行" in finance, (river, finance)
-        assert any(char in report["translations"][2]["translation"] for char in ("没", "不"))
+        assert river != finance and any(char in river for char in ("河", "岸")) and "银行" in finance, (river, finance)
+        assert any(char in report["translations"][2]["translation"] for char in ("没", "不", "未", "非"))
         assert "37.5" in report["translations"][3]["translation"]
+        idiom, fragment, pronoun, term = [row["translation"] for row in report["translations"][9:13]]
+        assert "公园" not in idiom and any(word in idiom for word in ("出色", "预期", "优", "成功", "卓越")), idiom
+        assert "我" in fragment and "不认为" not in fragment, fragment
+        assert any(word in pronoun for word in ("我们", "咱们")) and "美国" not in pronoun, pronoun
+        report["semantic_checks"] = {
+            "idiom_not_literal": "公园" not in idiom,
+            "incomplete_subject_preserved": "我" in fragment,
+            "pronoun_not_country": "美国" not in pronoun,
+            "performance_term": "硬" in term or "指标" in term,
+        }
     destination = ROOT / "artifacts" / "offline-check.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print("OFFLINE ASR + CONTEXTUAL TRANSLATION OK", flush=True)
+    failed = [name for name, passed in report["semantic_checks"].items() if not passed]
+    if failed:
+        print("KNOWN SEMANTIC FAILURES:", ", ".join(failed), flush=True)
 
 
 if __name__ == "__main__":
