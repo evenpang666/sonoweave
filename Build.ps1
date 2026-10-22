@@ -13,6 +13,7 @@ if (-not $bundlePath.StartsWith($PSScriptRoot + [System.IO.Path]::DirectorySepar
 & $python -m PyInstaller --noconfirm --windowed --onedir --name SonoWeave --collect-data soundcard --collect-all faster_whisper --collect-all ctranslate2 --collect-all llama_cpp --collect-data certifi main.py
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $PSScriptRoot 'dist\SonoWeave\README.md')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination (Join-Path $PSScriptRoot 'dist\SonoWeave\LICENSE')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'THIRD_PARTY.md') -Destination (Join-Path $PSScriptRoot 'dist\SonoWeave\THIRD_PARTY.md')
 New-Item -ItemType Directory -Force 'dist\SonoWeave\docs' | Out-Null
 Copy-Item -Path 'docs\*.md' -Destination 'dist\SonoWeave\docs' -Force

@@ -1,6 +1,6 @@
 # 第三方组件
 
-本程序使用下列开源组件。打包文件中的相关库仍遵循其各自许可证；分发修改版时应保留所需版权和许可信息。
+本项目原创代码采用 [MIT 许可证](LICENSE)。本程序使用下列开源组件，相关库和模型仍遵循其各自许可证；分发修改版时应保留所需版权和许可信息。
 
 - [PySide6 / Qt](https://doc.qt.io/qtforpython-6/licenses.html)：LGPLv3/GPLv3 或商业许可。此分发使用动态链接的未修改 Qt 库，库文件位于 `_internal/PySide6`。许可证与第三方通知见 `licenses`；源代码与许可信息见官方链接及 [Qt 6.8.3 源码](https://download.qt.io/archive/qt/6.8/6.8.3/single/)。
 - [SoundCard](https://github.com/bastibe/SoundCard)：BSD-3-Clause。
